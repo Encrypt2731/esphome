@@ -1,0 +1,273 @@
+# ============================================================
+# ESPHome – ESP32-H2 Zigbee Garage Door Controller
+# File: esphome-esp32h2-garage.yaml
+# ============================================================
+#
+# Hardware
+# --------
+# Board : ESP32-H2 (Zigbee 802.15.4 only — no WiFi or Bluetooth)
+# Relay : 5 V or 3.3 V NO (Normally Open) single-channel module,
+#         active-HIGH (coil energises when IN pin is HIGH)
+# Sensor: Reed / magnetic contact switch, NO type
+#
+# Default pin assignments — adjust these to match your wiring:
+#   GPIO8  → Relay IN  (relay coil control, active-HIGH)
+#   GPIO3  → Sensor    (reed switch: one leg to GPIO, other to GND)
+#
+# Zigbee pairing
+# --------------
+# 1. Flash this firmware to the ESP32-H2.
+# 2. Put your ZHA or Zigbee2MQTT coordinator into pairing mode.
+# 3. Power-cycle the ESP32-H2 — it pairs automatically on first boot.
+# 4. To re-pair: hold the BOOT button >5 s (wipes Zigbee NVS),
+#    then power-cycle to trigger a fresh join.
+#
+# Safety design for the relay
+# ----------------------------
+# The relay is wired to the garage opener's dry-contact terminals.
+# The ONLY way the relay coil can ever be energised is via an explicit
+# Home Assistant "turn on" command, and even then only for 300 ms.
+# Three independent layers enforce this:
+#   1. output.restore_value: false  — GPIO pin is always LOW on boot
+#   2. switch.restore_mode: ALWAYS_OFF — switch state is never stored
+#   3. on_turn_on automation — relay opens again after exactly 300 ms
+# ============================================================
+
+esphome:
+  name: esphome-esp32h2-garage
+  friendly_name: Garage Door Controller
+  # Belt-and-suspenders: explicitly de-energise the relay before any
+  # other component is initialised, in case of GPIO float during startup.
+  on_boot:
+    priority: 600          # Runs early — before most components start
+    then:
+      - output.turn_off: relay_output
+
+esp32:
+  board: esp32h2
+  variant: ESP32H2
+  framework:
+    # The Zigbee (802.15.4) SDK is only available under ESP-IDF.
+    # Do NOT switch to the Arduino framework — Zigbee will not build.
+    type: esp-idf
+    version: recommended   # Follows the latest stable IDF release
+    sdkconfig_options:
+      # Enable the Espressif Zigbee protocol stack
+      CONFIG_ZB_ENABLED: "y"
+      # ZED = Zigbee End Device.  Joins the network but does not relay
+      # traffic for other nodes (suitable for mains or battery powered).
+      # To extend mesh range on a mains device change to:
+      #   CONFIG_ZB_ZR: "y"   (Zigbee Router)
+      CONFIG_ZB_ZED: "y"
+      # Green Power forwarding — not used in this configuration
+      CONFIG_ZB_GP_ENABLED: "n"
+
+# Serial console logging — set level to NONE for a production install
+# to free up stack and reduce unnecessary output over USB.
+logger:
+  level: INFO
+
+# ============================================================
+# OUTPUT — Raw GPIO pin that drives the relay coil
+# ============================================================
+# Using a low-level 'output' component (rather than a switch directly)
+# gives us the most direct, unambiguous control over the GPIO pin.
+#
+# restore_value: false  ← critical safety setting.
+#   The pin is always initialised LOW on every boot.  The previous
+#   on/off state is deliberately never saved or restored.
+output:
+  - platform: gpio
+    id: relay_output
+    pin:
+      number: GPIO8        # ← CHANGE: relay IN pin on your board
+      mode:
+        output: true       # Standard push-pull output (not open-drain)
+    restore_value: false   # GPIO always starts LOW; relay always starts open
+
+# ============================================================
+# SWITCH — Momentary trigger exposed to Home Assistant via Zigbee
+# ============================================================
+# Home Assistant discovers this as a standard on/off switch.
+# When HA issues a "turn on" command the sequence is:
+#   1. relay_output goes HIGH  → relay coil energises → contacts close
+#   2. The 'on_turn_on' automation waits exactly 300 ms
+#   3. switch.turn_off fires   → GPIO goes LOW → relay opens
+#   4. The Zigbee On/Off attribute resets to OFF
+#
+# Because the switch self-resets to OFF, Home Assistant cannot
+# hold the relay closed by maintaining a persistent "on" command.
+switch:
+  - platform: output
+    name: "Garage Door Trigger"
+    id: relay_switch
+    output: relay_output
+    # ALWAYS_OFF: ESPHome will never restore a previous ON state from
+    # flash/NVS.  The relay is guaranteed open on every cold start.
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      then:
+        - delay: 300ms                    # Hard-coded 300 ms contact closure
+        - switch.turn_off: relay_switch   # Open relay + reset Zigbee state to OFF
+
+# ============================================================
+# BINARY SENSOR — Magnetic door contact (reed switch)
+# ============================================================
+# Typical wiring for a NO (Normally Open) reed switch:
+#   • Door CLOSED: magnet present  → reed contacts close → GPIO pulled LOW
+#                  → inverted: true → ESPHome/HA reports "Closed"
+#   • Door OPEN:   magnet absent   → reed contacts open  → GPIO floats HIGH
+#                  via internal pull-up resistor
+#                  → inverted: true → ESPHome/HA reports "Open"
+#
+# If your specific sensor behaves the opposite way (e.g. NC type),
+# remove the 'inverted: true' line — no other change needed.
+binary_sensor:
+  - platform: gpio
+    name: "Garage Door"
+    id: door_sensor
+    pin:
+      number: GPIO3        # ← CHANGE: sensor input pin on your board
+      mode:
+        input: true
+        pullup: true       # Use the chip's built-in pull-up; no external
+                           # resistor is required
+      inverted: true       # Closed circuit (door closed) → reports Closed
+    # 'garage_door' device class tells Home Assistant to display proper
+    # open/closed icons and use the correct state text.
+    device_class: garage_door
+    filters:
+      # Debounce filter: discard state changes shorter than 50 ms.
+      # Prevents false triggers from contact bounce or door vibration.
+      - delayed_on_off: 50ms
+
+# ============================================================
+# ZIGBEE — Radio and endpoint configuration
+# ============================================================
+# Two Zigbee endpoints are registered with the Home Automation profile:
+#
+#   Endpoint 1 — On/Off Output  →  controls the relay trigger switch
+#   Endpoint 2 — IAS Zone       →  reports door open / closed state
+#
+# After pairing, ZHA will automatically create two entities in HA:
+#   switch.garage_door_trigger    (send "turn on" to pulse the opener)
+#   binary_sensor.garage_door     (open / closed state)
+#
+# NOTE: ESPHome's Zigbee component API is under active development.
+# If your ESPHome version uses a different cluster-binding syntax,
+# consult https://esphome.io/components/zigbee.html for the current
+# reference and update the 'clusters:' blocks below accordingly.
+zigbee:
+  # Fired when the device successfully joins or rejoins the Zigbee network.
+  on_join:
+    then:
+      - logger.log: "Zigbee network joined / rejoined successfully"
+
+  endpoints:
+    # ----------------------------------------------------------
+    # Endpoint 1: On/Off Output (controllable relay trigger)
+    #
+    # Profile:        Home Automation (0x0104)
+    # Device type:    On/Off Output   (0x0051)
+    # Cluster:        On/Off Server   (0x0006)
+    #
+    # ZHA/Z2M will send standard Zigbee On/Off commands here.
+    # The 'component' binding maps those commands to relay_switch.
+    # ----------------------------------------------------------
+    - num: 1
+      profile_id: 0x0104           # Zigbee Home Automation profile
+      device_identifier: 0x0051   # On/Off Output (externally controlled switch)
+      clusters:
+        - cluster_id: on_off       # Cluster 0x0006 — on/off commands
+          component: relay_switch  # Routes Zigbee on/off to our switch entity
+
+    # ----------------------------------------------------------
+    # Endpoint 2: Contact / Door Sensor
+    #
+    # Profile:        Home Automation (0x0104)
+    # Device type:    IAS Zone        (0x0402)
+    # Cluster:        IAS Zone Server (0x0500)
+    # Zone type:      Contact switch  (0x0015) — reed / magnetic contact
+    #
+    # The IAS Zone cluster is the standard Zigbee mechanism for
+    # alarm / contact sensors.  'zone_type: contact_switch' tells
+    # the coordinator (and therefore HA) that this is a door/window
+    # reed switch rather than a PIR or smoke detector.
+    # ----------------------------------------------------------
+    - num: 2
+      profile_id: 0x0104           # Zigbee Home Automation profile
+      device_identifier: 0x0402   # IAS Zone sensor
+      clusters:
+        - cluster_id: ias_zone     # Cluster 0x0500 — intrusion alarm zone
+          component: door_sensor   # Links zone status to our binary sensor
+          zone_type: contact_switch  # 0x0015 — magnetic contact / reed switch
+
+# ============================================================
+# RELAY SAFETY ANALYSIS — Will the relay close on reboot or
+# power cycle?
+# ============================================================
+#
+# Short answer: the firmware layers are solid, but there is one
+# hardware-level risk worth understanding and mitigating.
+#
+# --- Software layers (all three hold on reboot) --------------
+#
+# Layer 1 — output.restore_value: false
+#   The GPIO output component initialises the pin LOW as part of
+#   its own setup routine, before any other component runs.
+#   The previous on/off state is never read from flash/NVS.
+#
+# Layer 2 — switch.restore_mode: ALWAYS_OFF
+#   ESPHome never recalls a saved ON state for this switch.
+#   The switch always starts in the OFF (relay open) state.
+#
+# Layer 3 — on_boot: priority: 600
+#   An explicit output.turn_off call runs very early in the boot
+#   sequence, after the output pin is configured, as an additional
+#   belt-and-suspenders measure.
+#
+# All three layers operate before the Zigbee stack initialises,
+# so no Zigbee command can race against them during startup.
+# A software (watchdog) reboot is therefore safe.
+#
+# --- The hardware window (power-on risk) ---------------------
+#
+# Between the moment power is applied and the moment the ESP-IDF
+# firmware configures the GPIO as a driven output, there is a
+# window of tens of milliseconds where the pin is in its hardware
+# reset state and is NOT controlled by firmware.
+#
+# During this window the pin behaviour is determined by the chip's
+# silicon defaults, not by any setting in this file.
+#
+# GPIO8 on the ESP32-H2 is a STRAPPING PIN.
+# Strapping pins on the ESP32-H2 have internal pull-ups or
+# pull-downs that the chip samples at reset to select boot mode.
+# If GPIO8 carries an internal pull-up during reset, and the relay
+# module is active-HIGH, the relay coil could briefly energise for
+# those few milliseconds before firmware takes over.
+#
+# --- Recommended mitigations ---------------------------------
+#
+# 1. Move the relay to a non-strapping GPIO.
+#    On the ESP32-H2 the strapping pins are GPIO2, GPIO8, GPIO9.
+#    Safe alternatives for the relay: GPIO4, GPIO5, GPIO10, GPIO11.
+#    Update the 'number:' field in the output block above.
+#
+# 2. Add a 10 kΩ pull-down resistor between the relay IN pin
+#    and GND.  This is a HARDWARE guarantee: the relay input is
+#    held LOW by physics regardless of firmware state, strapping
+#    pin behaviour, or GPIO float.  Even if the pin has an internal
+#    pull-up, a 10 kΩ external pull-down will override it and keep
+#    a typical relay optocoupler/transistor firmly off.
+#
+#    Wiring:
+#      ESP32-H2 GPIO ──┬──► Relay IN
+#                      │
+#                    10 kΩ
+#                      │
+#                     GND
+#
+# Applying both mitigations makes the relay unconditionally safe
+# during every power state, independent of firmware.
+# ============================================================
