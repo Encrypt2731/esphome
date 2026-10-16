@@ -1,0 +1,704 @@
+
+> Can you modify the proxmox helper script for Paperless-NGX to set the default
+  paths before the script is deployed?
+
+  Thought for 2s (ctrl+o to expand)
+
+● Let me first look at the current working directory to find any Proxmox or
+  Paperless-NGX related scripts.
+
+  Searched for 2 patterns, listed 1 directory (ctrl+o to expand)
+
+● I don't see any Proxmox or Paperless-NGX scripts locally. Could you clarify
+  where the script is?
+  ⎿  Interrupted · What should Claude do instead?
+
+> Can you modify the proxmox helper script for Paperless-NGX to set the default
+  paths before the script is deployed? I am referring to the Community helper
+  script available at: https://github.com/paperless-ngx/paperless-ngx
+
+  Thought for 8s (ctrl+o to expand)
+
+● Let me fetch the Paperless-NGX GitHub repo to find the Proxmox helper script.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Fetch(https://github.com/paperless-ngx/paperless-ngx)
+  ⎿  Received 365.6KB (200 OK)
+
+  Thought for 2s (ctrl+o to expand)
+
+● The Proxmox helper scripts for Paperless-NGX are actually from the community
+  scripts repo, not the paperless-ngx repo itself. Let me find that script.
+
+● Fetch(https://github.com/community-scripts/ProxmoxVE/blob/main/ct/paperless-ng
+       x.sh)
+  ⎿  Received 389.3KB (200 OK)
+
+● Fetch(https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/ct/pa
+       perless-ngx.sh)
+  ⎿  Received 15.3KB (200 OK)
+
+  Thought for 2s (ctrl+o to expand)
+
+● Let me fetch the raw script directly via curl to see the actual code.
+
+  Thought for 3s, ran 2 shell commands (ctrl+o to expand)
+
+● Now let me fetch the install script which is where the paths are actually set
+  up.
+
+  Thought for 8s, ran 1 shell command (ctrl+o to expand)
+
+● I've got both scripts. The install script sets these paths via sed
+  substitutions into paperless.conf:
+
+  ┌───────────────────────────┬─────────────────────────────┐
+  │         Variable          │       Current Default       │
+  ├───────────────────────────┼─────────────────────────────┤
+  │ PAPERLESS_CONSUMPTION_DIR │ /opt/paperless_data/consume │
+  ├───────────────────────────┼─────────────────────────────┤
+  │ PAPERLESS_DATA_DIR        │ /opt/paperless_data/data    │
+  ├───────────────────────────┼─────────────────────────────┤
+  │ PAPERLESS_MEDIA_ROOT      │ /opt/paperless_data/media   │
+  ├───────────────────────────┼─────────────────────────────┤
+  │ PAPERLESS_EMPTY_TRASH_DIR │ /opt/paperless_data/trash   │
+  ├───────────────────────────┼─────────────────────────────┤
+  │ PAPERLESS_STATICDIR       │ /opt/paperless/static       │
+  └───────────────────────────┴─────────────────────────────┘
+
+  What custom paths do you want to use for each of those? Also — do you want me
+  to save a modified copy of the script locally, or are you looking to
+  fork/patch something else?
+
+> /mnt/nas/consume
+  /mnt/nas/data
+  /mnt/nas/trash
+  /mnt/nas/media
+  /opt/paperless/static
+
+  Thought for 6s (ctrl+o to expand)
+
+● Downloading and modifying the install script with your NAS paths.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Now I'll make the three changes: the mkdir -p line and the five path
+  substitutions in the sed -i block.
+
+● Update(Documents\paperless-ngx-install.sh)
+  ⎿  Added 1 line, removed 1 line
+      52  cd /opt/paperless
+      53  rm -rf /opt/paperless/docker
+      54  $STD uv sync --all-extras
+      55 -mkdir -p /opt/paperless_data/{consume,data,media,trash}        
+      55 +mkdir -p /mnt/nas/{consume,data,media,trash}                   
+      56  mkdir -p /opt/paperless/static
+      57  SECRET_KEY="$(random_password 32)"
+      58  cat <<EOF >~/paperless-ngx.creds
+
+● Update(Documents\paperless-ngx-install.sh)
+  ⎿  Added 4 lines, removed 4 lines
+      63  EOF
+      64  sed -i \
+      65    -e 's|#PAPERLESS_REDIS=redis://localhost:6379|PAPERLESS_REDIS
+          =redis://localhost:6379|' \
+      66 -  -e "s|#PAPERLESS_CONSUMPTION_DIR=../consume|PAPERLESS_CONSUMP
+         -TION_DIR=/opt/paperless_data/consume|" \                       
+      67 -  -e "s|#PAPERLESS_DATA_DIR=../data|PAPERLESS_DATA_DIR=/opt/pap
+         -erless_data/data|" \                                           
+      68 -  -e "s|#PAPERLESS_MEDIA_ROOT=../media|PAPERLESS_MEDIA_ROOT=/op
+         -t/paperless_data/media|" \                                     
+      69 -  -e "s|#PAPERLESS_EMPTY_TRASH_DIR=|PAPERLESS_EMPTY_TRASH_DIR=/
+         -opt/paperless_data/trash|" \                                   
+      66 +  -e "s|#PAPERLESS_CONSUMPTION_DIR=../consume|PAPERLESS_CONSUMP
+         +TION_DIR=/mnt/nas/consume|" \                                  
+      67 +  -e "s|#PAPERLESS_DATA_DIR=../data|PAPERLESS_DATA_DIR=/mnt/nas
+         +/data|" \                                                      
+      68 +  -e "s|#PAPERLESS_MEDIA_ROOT=../media|PAPERLESS_MEDIA_ROOT=/mn
+         +t/nas/media|" \                                                
+      69 +  -e "s|#PAPERLESS_EMPTY_TRASH_DIR=|PAPERLESS_EMPTY_TRASH_DIR=/
+         +mnt/nas/trash|" \                                              
+      70    -e "s|#PAPERLESS_STATICDIR=../static|PAPERLESS_STATICDIR=/opt
+          /paperless/static|" \
+      71    -e 's|#PAPERLESS_DBHOST=localhost|PAPERLESS_DBENGINE=postgres
+          ql\nPAPERLESS_DBHOST=localhost|' \
+      72    -e 's|#PAPERLESS_DBPORT=5432|PAPERLESS_DBPORT=5432|' \
+
+● Done. Here's a summary of what changed in Documents/paperless-ngx-install.sh:
+
+  ┌──────┬──────────────────────────────────────────────────────────┐
+  │ Line │                          Change                          │
+  ├──────┼──────────────────────────────────────────────────────────┤
+  │ 55   │ mkdir -p now creates /mnt/nas/{consume,data,media,trash} │
+  ├──────┼──────────────────────────────────────────────────────────┤
+  │ 66   │ PAPERLESS_CONSUMPTION_DIR → /mnt/nas/consume             │
+  ├──────┼──────────────────────────────────────────────────────────┤
+  │ 67   │ PAPERLESS_DATA_DIR → /mnt/nas/data                       │
+  ├──────┼──────────────────────────────────────────────────────────┤
+  │ 68   │ PAPERLESS_MEDIA_ROOT → /mnt/nas/media                    │
+  ├──────┼──────────────────────────────────────────────────────────┤
+  │ 69   │ PAPERLESS_EMPTY_TRASH_DIR → /mnt/nas/trash               │
+  ├──────┼──────────────────────────────────────────────────────────┤
+  │ 70   │ PAPERLESS_STATICDIR → /opt/paperless/static (unchanged)  │
+  └──────┴──────────────────────────────────────────────────────────┘
+
+  One thing to be aware of: the NAS mount at /mnt/nas must exist and be mounted
+  before the script runs, otherwise the mkdir -p will silently create local
+  directories instead of NAS paths. You may want to add a check at the top of
+  the msg_info "Setup Paperless-ngx" block to verify the mount is present.
+
+> can you also modify the script so that the following configuration is
+  included:
+  PAPERLESS_FILENAME_FORMAT={{ original_name }}
+
+  Thought for 3s (ctrl+o to expand)
+
+● Update(Documents\paperless-ngx-install.sh)
+  ⎿  Added 1 line
+      74    -e "s|#PAPERLESS_DBUSER=paperless|PAPERLESS_DBUSER=$PG_DB_USE
+          R|" \
+      75    -e "s|#PAPERLESS_DBPASS=paperless|PAPERLESS_DBPASS=$PG_DB_PAS
+          S|" \
+      76    -e "s|PAPERLESS_SECRET_KEY=change-me|PAPERLESS_SECRET_KEY=$SE
+          CRET_KEY|" \
+      77 +  -e '$a\PAPERLESS_FILENAME_FORMAT={{ original_name }}' \      
+      78    /opt/paperless/paperless.conf
+      79  cd /opt/paperless/src
+      80  set -a
+● Added. The new line appends PAPERLESS_FILENAME_FORMAT={{ original_name }} to
+  the end of paperless.conf during setup.
+
+  One heads-up: {{ original_name }} is a Jinja2-style template token —
+  Paperless-NGX uses {original_name} (single braces) in its filename format
+  syntax. Double braces are the escaped literal form. Double-check which format
+  your version expects; if it's single braces, the value should be
+  PAPERLESS_FILENAME_FORMAT={original_name}.
+
+> let's use the format that paperless-ngx expects
+
+  Thought for 2s (ctrl+o to expand)
+
+● Update(Documents\paperless-ngx-install.sh)
+  ⎿  Added 1 line, removed 1 line
+      74    -e "s|#PAPERLESS_DBUSER=paperless|PAPERLESS_DBUSER=$PG_DB_USE
+          R|" \
+      75    -e "s|#PAPERLESS_DBPASS=paperless|PAPERLESS_DBPASS=$PG_DB_PAS
+          S|" \
+      76    -e "s|PAPERLESS_SECRET_KEY=change-me|PAPERLESS_SECRET_KEY=$SE
+          CRET_KEY|" \
+      77 -  -e '$a\PAPERLESS_FILENAME_FORMAT={{ original_name }}' \      
+      77 +  -e '$a\PAPERLESS_FILENAME_FORMAT={original_name}' \          
+      78    /opt/paperless/paperless.conf
+      79  cd /opt/paperless/src
+      80  set -a
+
+● Updated to {original_name} — the correct single-brace format Paperless-NGX
+  expects.
+
+> how do i open the script?
+
+● Since you're on Windows, the file is at:
+
+  C:\Users\I570525\Documents\paperless-ngx-install.sh
+
+  A few options:
+
+  - VS Code — right-click the file in Explorer → "Open with Code", or from a
+    terminal: code ~/Documents/paperless-ngx-install.sh
+  - Notepad — double-click it, or right-click → "Open with" → Notepad
+  - Notepad++ — right-click → "Edit with Notepad++" (if installed)
+
+  For a shell script, VS Code or Notepad++ will give you syntax highlighting.
+  Notepad works fine for just reading it.
+
+> Can you please summarise the key differences between the original script on
+  Github and the one you have now edited?
+
+● Here's a summary of the three changes made to
+  Documents/paperless-ngx-install.sh compared to the original on GitHub
+  (https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/install/pa
+  perless-ngx-install.sh):
+
+  1. Directory creation (line 55)
+  - Original: mkdir -p /opt/paperless_data/{consume,data,media,trash}
+  - Modified: mkdir -p /mnt/nas/{consume,data,media,trash}
+
+  2. Data paths in paperless.conf (lines 66–69)
+
+  ┌────────────────────────┬──────────────────────────┬────────────────────┐
+  │        Setting         │         Original         │      Modified      │
+  ├────────────────────────┼──────────────────────────┼────────────────────┤
+  │ PAPERLESS_CONSUMPTION_ │ /opt/paperless_data/cons │ /mnt/nas/consume   │
+  │ DIR                    │ ume                      │                    │
+  ├────────────────────────┼──────────────────────────┼────────────────────┤
+  │ PAPERLESS_DATA_DIR     │ /opt/paperless_data/data │ /mnt/nas/data      │
+  ├────────────────────────┼──────────────────────────┼────────────────────┤
+  │ PAPERLESS_MEDIA_ROOT   │ /opt/paperless_data/medi │ /mnt/nas/media     │
+  │                        │ a                        │                    │
+  ├────────────────────────┼──────────────────────────┼────────────────────┤
+  │ PAPERLESS_EMPTY_TRASH_ │ /opt/paperless_data/tras │ /mnt/nas/trash     │
+  │ DIR                    │ h                        │                    │
+  ├────────────────────────┼──────────────────────────┼────────────────────┤
+  │ PAPERLESS_STATICDIR    │ /opt/paperless/static    │ /opt/paperless/sta │
+  │                        │                          │ tic (unchanged)    │
+  └────────────────────────┴──────────────────────────┴────────────────────┘
+
+  3. Filename format (new addition)
+  - Original: not set (Paperless-NGX uses its own default)
+  - Modified: appends PAPERLESS_FILENAME_FORMAT={original_name} to
+    paperless.conf, so stored documents keep their original filename rather than
+    being renamed by Paperless-NGX.
+
+> Can you apply the same changes to the file located at ct/paperless-ngx.sh?
+
+  Thought for 11s (ctrl+o to expand)
+
+● Let me download that file first and check what's there before making changes.
+
+  Thought for 12s, read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Having read through ct/paperless-ngx.sh, the same changes don't apply here.
+  This file serves a different purpose — it's the container creation and update
+  wrapper. Specifically:
+
+  - It doesn't set any paths in paperless.conf — that all happens in
+    paperless-ngx-install.sh, which we've already modified
+  - The update_script() function deliberately preserves your existing
+    paperless.conf by backing it up before updating and restoring it afterwards,
+    so your NAS paths and PAPERLESS_FILENAME_FORMAT will survive updates
+    automatically
+  - The only reference to /opt/paperless_data/ (line 44) is a migration
+    detection message for users upgrading from a very old structure — changing
+    it would break that migration logic
+
+  In short, the install script is the right place for these changes, and
+  ct/paperless-ngx.sh doesn't need to be touched.
+
+> How do I deploy the install script that you created in proxmox via the GUI?
+
+  Thought for 20s (ctrl+o to expand)
+
+● These community scripts aren't deployed through the Proxmox GUI directly —
+  they run from the Proxmox host shell. Since you have a modified install
+  script, here's the most practical approach:
+
+  ---
+
+  Step 1 — Get your modified script onto the Proxmox host
+
+  From your Windows machine, SCP the file over:
+  scp ~/Documents/paperless-ngx-install.sh
+  root@<proxmox-ip>:/root/paperless-ngx-install.sh
+
+  ---
+
+  Step 2 — Open the Proxmox shell
+
+  In the Proxmox web UI: click your node → Shell
+
+  ---
+
+  Step 3 — Download and edit the ct script
+
+  curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/
+  ct/paperless-ngx.sh -o /root/paperless-ngx-ct.sh
+
+  Then find the line that references the install script URL and point it at your
+  local copy instead. The build_container function sources the install script —
+  check what URL it uses:
+
+  grep -i "install" /root/paperless-ngx-ct.sh
+
+  ---
+
+  Step 4 — Run the ct script
+
+  bash /root/paperless-ngx-ct.sh
+
+  This will walk you through container creation interactively.
+
+  ---
+
+  Important caveat: Make sure /mnt/nas is mounted on the Proxmox host and passed
+  through to the LXC container as a bind mount before running the install
+  script, otherwise the NAS paths won't exist inside the container when the
+  script runs. That's configured in the LXC's options under Resources → Add →
+  Mount Point in the GUI.
+
+> How do I SCP the file from Windows into Proxmox?
+
+● From a Windows terminal (Command Prompt, PowerShell, or Git Bash), run:
+
+  scp C:\Users\I570525\Documents\paperless-ngx-install.sh
+  root@<proxmox-ip>:/root/paperless-ngx-install.sh
+
+  Replace <proxmox-ip> with your Proxmox server's IP address, e.g.
+  192.168.1.100.
+
+  ---
+
+  Prerequisites:
+  - scp is built into Windows 10/11 by default, so no extra tools needed
+  - You'll be prompted for the Proxmox root password after running the command
+  - SSH must be enabled on the Proxmox host (it is by default)
+
+  ---
+
+  If you're unsure of your Proxmox IP, you can find it in the Proxmox web UI
+  under your node → Summary — it's listed under the network section.
+
+> How do I add an existing LXC container in Proxmox to my Tailscale tailnet so
+  that it can be accessed by other devices on my tailnet?
+
+● This is more of a Proxmox/Tailscale setup question than a coding task, but
+  here's the process:
+
+  ---
+
+  1 — Open the container's console
+
+  In the Proxmox web UI, click your LXC container → Console
+
+  ---
+
+  2 — Install Tailscale
+
+  curl -fsSL https://tailscale.com/install.sh | sh
+
+  ---
+
+  3 — Start and authenticate Tailscale
+
+  tailscale up
+
+  This outputs an authentication URL — open it in your browser and log in to
+  your Tailscale account to approve the device.
+
+  ---
+
+  4 — Verify it's connected
+
+  tailscale ip
+
+  This should return a 100.x.x.x Tailscale IP that other devices on your tailnet
+  can use to reach it.
+
+  ---
+
+  Important — LXC-specific requirement:
+
+  Unprivileged LXC containers (which is what the Paperless-NGX script creates)
+  need a TUN device to run Tailscale. Without it, tailscale up will fail. Fix it
+  from the Proxmox host shell:
+
+  # Replace 100 with your container's ID
+  echo 'lxc.cgroup2.devices.allow = c 10:200 rwm
+  lxc.mount.entry = /dev/net/tun dev/net/tun none bind,create=file' >>
+  /etc/pve/lxc/100.conf
+
+  Then restart the container:
+  pct restart 100
+
+  After that, re-run tailscale up inside the container.
+
+> I get the following error when entering tailscale up: failed to connect to
+  local tailscaled; it doesn't appear to be running (sudo systemctl start
+  tailscaled ?)
+
+● Run this to start the Tailscale daemon, then bring it up:
+
+  systemctl start tailscaled
+  systemctl enable tailscaled
+  tailscale up
+
+  enable ensures it starts automatically on container reboot so you don't hit
+  this again.
+
+> I just tried that as well and get the following error: failed to connect to
+  local tailscaled (which appears to be running as tailscaled, pid 119551). Got
+  error: Failed to connect to local Tailscale daemon for /localapi/v0/status;
+  not running? Error: dial unix /var/run/tailscale/tailscaled.sock: connect: no
+  such file or directory
+
+● This is the TUN device issue mentioned earlier. The socket can't be created
+  because the container doesn't have access to /dev/net/tun. Run these commands
+  from the Proxmox host shell (not inside the container):
+
+  1 — Stop the container
+  pct stop 100
+  (replace 100 with your container ID)
+
+  2 — Add the TUN device config
+  echo 'lxc.cgroup2.devices.allow = c 10:200 rwm
+  lxc.mount.entry = /dev/net/tun dev/net/tun none bind,create=file' >>
+  /etc/pve/lxc/100.conf
+
+  3 — Start the container again
+  pct start 100
+
+  4 — Back inside the container, start tailscaled and bring it up
+  systemctl start tailscaled
+  tailscale up
+
+  You should now get the authentication URL without errors.
+
+> How do I tag the network traffic for a particular container so that it only
+  goes via a particular vlan (say VLAN 20)
+
+● This is configured on the Proxmox host, not inside the container. In Proxmox,
+  VLANs are handled at the network bridge level.
+
+  ---
+
+  Via the Proxmox GUI:
+
+  1. Click your container → Network
+  2. Click the existing network interface (e.g. eth0)
+  3. Set the VLAN Tag field to 20
+  4. Click OK then restart the container
+
+  ---
+
+  Or directly in the container's config file from the Proxmox host shell:
+
+  nano /etc/pve/lxc/100.conf
+
+  Find the net0 line and add tag=20:
+
+  net0: name=eth0,bridge=vmbr0,hwaddr=XX:XX:XX:XX:XX:XX,ip=dhcp,tag=20,type=veth
+
+  Then restart:
+  pct restart 100
+
+  ---
+
+  Prerequisites:
+
+  - Your physical switch port connected to the Proxmox host must be configured
+    as a trunk port that carries VLAN 20
+  - The Proxmox bridge (vmbr0) must have VLAN-aware enabled — check this under
+    your node → Network → click vmbr0 → ensure VLAN aware is ticked
+  - Your router/firewall must have VLAN 20 configured with a DHCP server if
+    you're using DHCP
+
+> how does the network traffic for all the other containers get treated
+  (Assuming they are not tagged like the container above)?
+
+● Untagged traffic (containers without a tag= on their net0 line) travels on the
+  native/untagged VLAN of the bridge — typically referred to as VLAN 1 or
+  whatever your switch treats as the default untagged VLAN on that trunk port.
+
+  So in practice:
+
+  ┌───────────────┬─────────┬────────────────────────────────────┐
+  │   Container   │ Tag set │          Traffic lands on          │
+  ├───────────────┼─────────┼────────────────────────────────────┤
+  │ Paperless-NGX │ tag=20  │ VLAN 20                            │
+  ├───────────────┼─────────┼────────────────────────────────────┤
+  │ All others    │ none    │ Native/untagged VLAN (e.g. VLAN 1) │
+  └───────────────┴─────────┴────────────────────────────────────┘
+
+  ---
+
+  One thing to be aware of: if your other containers are on the native VLAN and
+  your VLAN 20 container is on a separate subnet, they won't be able to talk to
+  each other directly unless your router/firewall has inter-VLAN routing enabled
+  and a rule permitting it.
+
+  This is actually a common reason to use VLANs in a home lab — isolating
+  certain services (like a NAS-connected document manager) from the rest of your
+  containers.
+
+> How do I pre-configure the default Mealie directories to a remote location on
+  a NAS using the community-scripts installer for Mealie?
+
+  Thought for 3s (ctrl+o to expand)
+
+● Let me fetch the Mealie install script from the community scripts repo first.
+
+  Thought for 10s, ran 1 shell command (ctrl+o to expand)
+
+● The Mealie install script stores data under MEALIE_HOME=/opt/mealie and writes
+  its config to /opt/mealie/mealie.env. The key variable for pointing data to a
+  NAS is DATA_DIR.
+
+  What NAS path do you want to use for Mealie's data directory? For example
+  /mnt/nas/mealie — or do you want to break it into subdirectories like you did
+  with Paperless-NGX?
+
+> When I seek to deploy Mealie via the recommended command (bash -c "$(curl
+  -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/ct/m
+  ealie.sh)"), how does this lead into the install script containing the
+  default directories?
+
+  Thought for 3s (ctrl+o to expand)
+
+● Good question. Let me trace the full execution chain.
+
+  Thought for 10s, ran 29 shell commands (ctrl+o to expand)
+
+● Now I have the full picture. Here's the complete chain:
+
+  ---
+
+  1 — You run the one-liner on the Proxmox host shell
+  bash -c "$(curl -fsSL .../ct/mealie.sh)"
+
+  2 — ct/mealie.sh sources core/build.func
+  This loads all the engine functions from the community-scripts/core repo,
+  including build_container.
+
+  3 — ct/mealie.sh calls build_container
+  The last three lines of ct/mealie.sh are:
+  start
+  build_container   # ← this is where the magic happens
+  description
+
+  4 — build_container (in pve/backend.func) creates the LXC container
+  It runs pct create with all your settings (CPU, RAM, disk, network, etc.) to
+  spin up the container.
+
+  5 — build_container fetches the install script from GitHub
+  This is the critical line:
+  _install_script="$(_cs_fetch_text "install/${var_install}.sh")"
+  var_install resolves to mealie, so it fetches install/mealie-install.sh
+  directly from COMMUNITY_SCRIPTS_URL (which defaults to
+  https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main).
+
+  6 — It runs the install script inside the container
+  lxc-attach -n "$CTID" -- bash -c "$_install_script"
+
+  ---
+
+  The implication for your modified script
+
+  Because the install script is fetched live from GitHub at deploy time, your
+  locally modified mealie-install.sh is never used unless you tell the engine to
+  look elsewhere. The way to do that is to set COMMUNITY_SCRIPTS_URL before
+  running the one-liner:
+
+  COMMUNITY_SCRIPTS_URL=https://raw.githubusercontent.com/<your-fork>/<repo>/mai
+  n \
+    bash -c "$(curl -fsSL .../ct/mealie.sh)"
+
+  This means the cleanest approach is to fork the community-scripts repo on
+  GitHub, push your modified install script there, and point
+  COMMUNITY_SCRIPTS_URL at your fork.
+> Why does the Unifi OS Server need to be in a privileged container or VM?
+
+  Thought for 11s (ctrl+o to expand)
+
+● The core reasons come down to low-level system access that unprivileged LXC
+  containers cannot provide:
+
+  ---
+
+  1 — Docker-in-LXC
+  UniFi OS runs its applications (Network, Protect, Access, etc.) inside Docker
+  containers. Running Docker inside an unprivileged LXC container requires
+  nested containerization that the kernel blocks by default — privileged mode
+  (or a VM) removes that restriction.
+
+  2 — Raw socket access for device adoption
+  UniFi discovers and adopts devices using L2 broadcast packets and raw network
+  sockets. Unprivileged containers have restricted access to the network stack,
+  which breaks device discovery and adoption.
+
+  3 — iptables / nftables manipulation
+  UniFi OS manages firewall rules and NAT for the network it controls. Writing
+  iptables rules requires kernel-level network access that is denied to
+  unprivileged containers.
+
+  4 — Kernel module loading
+  Features like WireGuard VPN and certain switching functions may need to load
+  kernel modules — something unprivileged containers cannot do.
+
+  5 — MongoDB requirements
+  The database backend has memory management requirements (e.g.
+  vm.max_map_count) that require writing to /proc/sys, which is read-only inside
+  unprivileged containers.
+
+  ---
+
+  Why a VM sidesteps all of this
+  A VM gets its own full kernel, so none of these restrictions apply — it's the
+  cleanest option if you want full isolation without the complexity of a
+  privileged container. The tradeoff is more RAM and CPU overhead compared to an
+  LXC container.
+
+> How do I force all traffic for a qbittorrent container to be routed through a
+  vpn connection in a gluetun container?
+
+  Thought for 10s (ctrl+o to expand)
+
+● The approach depends on how you're running them. The most common setup for
+  Gluetun is Docker — are these Docker containers (possibly inside an LXC), or
+  separate LXC containers?
+
+  The answer differs significantly between the two:
+
+  - Docker containers — straightforward, handled entirely in docker-compose with
+    one line
+  - Separate LXC containers — much more complex, requires setting up IP routing
+    and forwarding between containers at the Proxmox network level
+
+  Which setup are you using?
+
+> let's go with docker
+
+● The key is network_mode: "service:gluetun" in your docker-compose file. This
+  makes qBittorrent share Gluetun's network namespace entirely, so all its
+  traffic is forced through the VPN tunnel.
+
+  services:
+    gluetun:
+      image: qmcgaw/gluetun
+      container_name: gluetun
+      cap_add:
+        - NET_ADMIN
+      devices:
+        - /dev/net/tun:/dev/net/tun
+      environment:
+        - VPN_SERVICE_PROVIDER=your_provider
+        - VPN_TYPE=wireguard          # or openvpn
+        - WIREGUARD_PRIVATE_KEY=xxx
+        - WIREGUARD_ADDRESSES=xxx
+      ports:
+        - 8080:8080    # qBittorrent web UI - ports must be declared HERE not on
+  qbittorrent
+        - 6881:6881    # qBittorrent torrent port TCP
+        - 6881:6881/udp
+      restart: unless-stopped
+
+    qbittorrent:
+      image: lscr.io/linuxserver/qbittorrent
+      container_name: qbittorrent
+      network_mode: "service:gluetun"   # ← the critical line
+      depends_on:
+        - gluetun
+      environment:
+        - PUID=1000
+        - PGID=1000
+        - TZ=Europe/London
+        - WEBUI_PORT=8080
+      volumes:
+        - ./config:/config
+        - /mnt/nas/downloads:/downloads
+      restart: unless-stopped
+
+  ---
+
+  Key points:
+
+  - Ports must be declared on the Gluetun service, not qBittorrent — since
+    qBittorrent has no network of its own, port mappings on it are ignored
+  - depends_on ensures Gluetun starts first, but doesn't guarantee the VPN
+    tunnel is up before qBittorrent starts — Gluetun has a built-in health check
+    you can use for that
+  - If Gluetun goes down, qBittorrent loses all connectivity automatically —
+    this is the kill switch behaviour you want
+
+  To verify traffic is routing through the VPN once running:
+  docker exec -it qbittorrent curl ifconfig.me
+  That should return your VPN provider's IP, not your home IP.

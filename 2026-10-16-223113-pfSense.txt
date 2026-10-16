@@ -1,0 +1,63 @@
+
+> How do I configure the firewall rules in pfSense to block a webcam (IP
+  192.168.2.80) from accessing the internet?
+
+  Thought for 2s (ctrl+o to expand)
+
+● Blocking a Device from Internet Access in pfSense
+
+  There are two main approaches: a LAN firewall rule or an alias-based rule.
+  Here's the recommended method:
+
+  Method 1: LAN Firewall Rule (simplest)
+
+  1. Log into pfSense web UI (typically https://192.168.1.1)
+  2. Navigate to Firewall > Rules > LAN
+  3. Click Add (the up-arrow button to add rule at the top of the list — order
+     matters)
+  4. Configure the rule:
+     - Action: Block
+     - Interface: LAN
+     - Address Family: IPv4
+     - Protocol: Any
+     - Source: Single host or alias → 192.168.2.80
+     - Destination: Any
+     - Description: Block webcam internet access
+  5. Click Save, then Apply Changes
+
+  ▎ Important: Place this rule above any existing "allow all" LAN rules. pfSense
+  ▎ processes rules top-to-bottom and stops at the first match.
+
+  ---
+
+  Method 2: Using an Alias (easier to manage long-term)
+
+  1. Go to Firewall > Aliases > IP, click Add
+     - Name: Webcam_Block
+     - Type: Host(s)
+     - Network: 192.168.2.80
+  2. Create the firewall rule as above, but set Source to the alias Webcam_Block
+
+  This makes it easy to add more devices later without editing the rule itself.
+
+  ---
+
+  Verify It's Working
+
+  After applying, check Firewall > Logs > Firewall — you should see blocked
+  entries from 192.168.2.80.
+
+  You can also run a quick test from another device:
+  ping 192.168.2.80       # should still work (LAN traffic isn't blocked)
+  # From the webcam's perspective, external IPs should time out
+
+  ---
+
+  Notes
+
+  - If the webcam is on a separate VLAN (e.g., a dedicated IoT VLAN), apply the
+    rule on that interface instead of LAN.
+  - If you want to allow the webcam to reach your local NVR/NAS but block
+    internet, set Destination to !RFC1918 (negate private ranges) instead of Any
+    — this requires first creating an alias for RFC1918 ranges.
+  - Static DHCP lease for 192.168.2.80 is recommended so the IP doesn't change.

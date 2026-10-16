@@ -1,0 +1,2061 @@
+
+> esphome script for an ESP32-H2 that:
+  connects 2 ds18b20 sensors
+  connects 2 PWM fans
+  controls the PWM fan speed based on the corresponding ds18b20 sensor
+  temperature
+  also includes a relay that can be controlled by a separate home assistant
+  automation
+
+  Please advise your assumed pinout for the code generated.
+
+  Thought for 1m 19s (ctrl+o to expand)
+
+● I'll write a clean ESPHome config for this. One important note upfront: the
+  ESP32-H2 has no WiFi — it uses Bluetooth 5 LE and IEEE 802.15.4
+  (Thread/Zigbee). HA connects to it via Bluetooth (requires a Bluetooth radio
+  on the HA host or a nearby Bluetooth proxy device).
+
+  ---
+
+  Assumed Pinout
+
+  ┌───────────────────────────┬────────┬───────────────────────────────────┐
+  │         Function          │  GPIO  │        External component         │
+  ├───────────────────────────┼────────┼───────────────────────────────────┤
+  │ DS18B20 Sensor 1 (1-Wire) │ GPIO4  │ 4.7kΩ pull-up to 3.3V             │
+  ├───────────────────────────┼────────┼───────────────────────────────────┤
+  │ DS18B20 Sensor 2 (1-Wire) │ GPIO5  │ 4.7kΩ pull-up to 3.3V             │
+  ├───────────────────────────┼────────┼───────────────────────────────────┤
+  │ Fan 1 PWM signal          │ GPIO10 │ Logic-level to fan header         │
+  ├───────────────────────────┼────────┼───────────────────────────────────┤
+  │ Fan 2 PWM signal          │ GPIO11 │ Logic-level to fan header         │
+  ├───────────────────────────┼────────┼───────────────────────────────────┤
+  │ Relay signal              │ GPIO2  │ Relay module or transistor driver │
+  └───────────────────────────┴────────┴───────────────────────────────────┘
+
+  ▎ PWM fans (4-pin PC style) run at 25 kHz. The relay GPIO drives a module — do
+  ▎ not wire mains loads directly to the GPIO.
+
+  ---
+
+  Fan Speed Curve
+
+  ┌──────────────────────┬─────────────────────────────────────┐
+  │     Temperature      │              Fan speed              │
+  ├──────────────────────┼─────────────────────────────────────┤
+  │ ≤ 30°C               │ 20% (minimum to keep fans spinning) │
+  ├──────────────────────┼─────────────────────────────────────┤
+  │ 30 – 60°C            │ Linear ramp 20% → 100%              │
+  ├──────────────────────┼─────────────────────────────────────┤
+  │ ≥ 60°C               │ 100%                                │
+  ├──────────────────────┼─────────────────────────────────────┤
+  │ Sensor failure (NaN) │ 100% (failsafe)                     │
+  └──────────────────────┴─────────────────────────────────────┘
+
+  ---
+
+  ESPHome YAML
+
+  esphome:
+    name: fan-controller
+    friendly_name: Fan Controller
+
+  esp32:
+    board: esp32h2devkitm
+    variant: esp32h2
+    framework:
+      type: esp-idf
+
+  logger:
+    level: INFO
+
+  # HA connects via Bluetooth LE (no WiFi on H2)
+  # Requires Bluetooth radio on HA host or a nearby BLE proxy device
+  api:
+    encryption:
+      key: !secret api_encryption_key
+
+  ota:
+    - platform: esphome
+      password: !secret ota_password
+
+  # Enables BLE for HA discovery and optionally proxies nearby BLE sensors
+  bluetooth_proxy:
+    active: true
+
+  # ── Hardware
+  ──────────────────────────────────────────────────────────────────
+
+  one_wire:
+    - platform: gpio
+      pin: GPIO4
+      id: ow_bus_1
+    - platform: gpio
+      pin: GPIO5
+      id: ow_bus_2
+
+  output:
+    - platform: ledc
+      pin: GPIO10
+      id: fan1_output
+      frequency: 25000Hz   # Standard 4-pin PC fan PWM frequency
+
+    - platform: ledc
+      pin: GPIO11
+      id: fan2_output
+      frequency: 25000Hz
+
+  switch:
+    - platform: gpio
+      pin: GPIO2
+      id: relay
+      name: "Relay"
+      icon: "mdi:electric-switch"
+      restore_mode: RESTORE_DEFAULT_OFF   # Safe default on power cycle
+
+  # ── Sensors & fan control
+  ─────────────────────────────────────────────────────
+
+  sensor:
+    - platform: dallas_temp
+      one_wire_id: ow_bus_1
+      name: "Temperature 1"
+      id: temp_1
+      unit_of_measurement: "°C"
+      accuracy_decimals: 1
+      update_interval: 10s
+      on_value:
+        then:
+          - lambda: |-
+              float t = x;
+              float spd;
+              if (isnan(t))        spd = 1.00f;               // failsafe
+              else if (t <= 30.0f) spd = 0.20f;               // minimum
+              else if (t >= 60.0f) spd = 1.00f;               // maximum
+              else                 spd = 0.20f + (t - 30.0f) / 30.0f * 0.80f;
+              id(fan1_output).set_level(spd);
+              id(fan1_speed).publish_state(spd * 100.0f);
+
+    - platform: dallas_temp
+      one_wire_id: ow_bus_2
+      name: "Temperature 2"
+      id: temp_2
+      unit_of_measurement: "°C"
+      accuracy_decimals: 1
+      update_interval: 10s
+      on_value:
+        then:
+          - lambda: |-
+              float t = x;
+              float spd;
+              if (isnan(t))        spd = 1.00f;
+              else if (t <= 30.0f) spd = 0.20f;
+              else if (t >= 60.0f) spd = 1.00f;
+              else                 spd = 0.20f + (t - 30.0f) / 30.0f * 0.80f;
+              id(fan2_output).set_level(spd);
+              id(fan2_speed).publish_state(spd * 100.0f);
+
+    # Read-only speed readbacks exposed to HA for dashboards/automations
+    - platform: template
+      name: "Fan 1 Speed"
+      id: fan1_speed
+      unit_of_measurement: "%"
+      accuracy_decimals: 0
+      icon: "mdi:fan"
+
+    - platform: template
+      name: "Fan 2 Speed"
+      id: fan2_speed
+      unit_of_measurement: "%"
+      accuracy_decimals: 0
+      icon: "mdi:fan"
+
+  Add to your secrets.yaml:
+
+  api_encryption_key: "<generate with: openssl rand -base64 32>"
+  ota_password: "<your-ota-password>"
+
+  ---
+
+  Wiring notes
+
+  - Each DS18B20 data pin needs a 4.7kΩ resistor between data and 3.3V — the
+    H2's internal pull-up is too weak for reliable 1-Wire.
+  - 4-pin PC fans: connect GND → GND, +12V → fan power rail, PWM pin →
+    GPIO10/11. The H2 outputs 3.3V logic which most fan controllers accept;
+    check your fan's spec sheet.
+  - The relay restore_mode: RESTORE_DEFAULT_OFF means it stays off after a power
+    cycle unless HA explicitly turns it on — safe for most automation setups.
+  - If HA doesn't find the device via Bluetooth, consider adding a second ESP32
+    (any WiFi variant) configured as a bluetooth_proxy to bridge it.
+
+> If I wanted to use the ESP32 to connect to home assistant with zigbee instead
+  of BLE, what would need to change?
+
+  Thought for 27s (ctrl+o to expand)
+
+● The hardware definitions, 1-Wire sensors, LEDC outputs, and all the fan
+  control lambda logic stay completely unchanged. Only the connectivity layer
+  changes.
+
+  ---
+
+  What gets removed
+
+  # Remove these entirely:
+  api:
+    encryption:
+      key: !secret api_encryption_key
+
+  ota:
+    - platform: esphome
+      password: !secret ota_password
+
+  bluetooth_proxy:
+    active: true
+
+  ---
+
+  What gets added
+
+  zigbee:
+    endpoints:
+      # Temperature sensor 1
+      - num: 1
+        device_type: TEMPERATURE_SENSOR
+        cluster_list:
+          - id: TEMP_MEASUREMENT
+            attributes:
+              - attr_id: MEASURED_VALUE
+                value_ref: temp_1
+
+      # Temperature sensor 2
+      - num: 2
+        device_type: TEMPERATURE_SENSOR
+        cluster_list:
+          - id: TEMP_MEASUREMENT
+            attributes:
+              - attr_id: MEASURED_VALUE
+                value_ref: temp_2
+
+      # Relay (on/off controllable from HA)
+      - num: 3
+        device_type: ON_OFF_OUTPUT
+        cluster_list:
+          - id: ON_OFF
+            attributes:
+              - attr_id: ON_OFF
+                value_ref: relay
+
+  Fan speed readback sensors (fan1_speed, fan2_speed) can be added as additional
+  endpoints with ANALOG_VALUE clusters if you want them visible in HA, but
+  they're not required for the relay control use case.
+
+  ---
+
+  What changes on the HA side
+
+  ┌─────────────────┬─────────────────────┬────────────────────────────────┐
+  │                 │    BLE approach     │        Zigbee approach         │
+  ├─────────────────┼─────────────────────┼────────────────────────────────┤
+  │ HA integration  │ ESPHome (via BLE)   │ ZHA or Zigbee2MQTT             │
+  ├─────────────────┼─────────────────────┼────────────────────────────────┤
+  │ Hardware needed │ Bluetooth radio on  │ Zigbee coordinator (e.g.       │
+  │                 │ HA host             │ Sonoff Dongle Plus, ConBee II) │
+  ├─────────────────┼─────────────────────┼────────────────────────────────┤
+  │ OTA firmware    │ Via ESPHome         │ Physical USB access or Zigbee  │
+  │ updates         │ integration         │ OTA (complex)                  │
+  ├─────────────────┼─────────────────────┼────────────────────────────────┤
+  │ Joining         │ Auto-discovered     │ Pairing mode required          │
+  └─────────────────┴─────────────────────┴────────────────────────────────┘
+
+  ---
+
+  Practical tradeoffs to consider
+
+  - OTA is the biggest gotcha — without WiFi or BLE, you lose easy over-the-air
+    updates. Plan for physical access to reflash.
+  - If you already have a Zigbee network (lights, sensors, etc.), this
+    integrates cleanly with no extra hardware.
+  - If this is your only Zigbee device, buying a coordinator just for one fan
+    controller is more overhead than it's worth — BLE is simpler.
+  - The ESPHome Zigbee component is newer and less mature than its WiFi/BLE
+    counterparts; check the ESPHome Zigbee docs
+    (https://esphome.io/components/zigbee.html) for the current cluster API as
+    it's been evolving.
+
+> Can you please apply the above changes and show the consolidated yaml
+
+  Thought for 3s (ctrl+o to expand)
+
+● Here's the full consolidated config with the Zigbee changes applied:
+
+  esphome:
+    name: fan-controller
+    friendly_name: Fan Controller
+
+  esp32:
+    board: esp32h2devkitm
+    variant: esp32h2
+    framework:
+      type: esp-idf
+
+  logger:
+    level: INFO
+
+  zigbee:
+    endpoints:
+      - num: 1
+        device_type: TEMPERATURE_SENSOR
+        cluster_list:
+          - id: TEMP_MEASUREMENT
+            attributes:
+              - attr_id: MEASURED_VALUE
+                value_ref: temp_1
+
+      - num: 2
+        device_type: TEMPERATURE_SENSOR
+        cluster_list:
+          - id: TEMP_MEASUREMENT
+            attributes:
+              - attr_id: MEASURED_VALUE
+                value_ref: temp_2
+
+      - num: 3
+        device_type: ON_OFF_OUTPUT
+        cluster_list:
+          - id: ON_OFF
+            attributes:
+              - attr_id: ON_OFF
+                value_ref: relay
+
+  # ── Hardware
+  ──────────────────────────────────────────────────────────────────
+
+  one_wire:
+    - platform: gpio
+      pin: GPIO4
+      id: ow_bus_1
+    - platform: gpio
+      pin: GPIO5
+      id: ow_bus_2
+
+  output:
+    - platform: ledc
+      pin: GPIO10
+      id: fan1_output
+      frequency: 25000Hz
+
+    - platform: ledc
+      pin: GPIO11
+      id: fan2_output
+      frequency: 25000Hz
+
+  switch:
+    - platform: gpio
+      pin: GPIO2
+      id: relay
+      name: "Relay"
+      icon: "mdi:electric-switch"
+      restore_mode: RESTORE_DEFAULT_OFF
+
+  # ── Sensors & fan control
+  ─────────────────────────────────────────────────────
+
+  sensor:
+    - platform: dallas_temp
+      one_wire_id: ow_bus_1
+      name: "Temperature 1"
+      id: temp_1
+      unit_of_measurement: "°C"
+      accuracy_decimals: 1
+      update_interval: 10s
+      on_value:
+        then:
+          - lambda: |-
+              float t = x;
+              float spd;
+              if (isnan(t))        spd = 1.00f;
+              else if (t <= 30.0f) spd = 0.20f;
+              else if (t >= 60.0f) spd = 1.00f;
+              else                 spd = 0.20f + (t - 30.0f) / 30.0f * 0.80f;
+              id(fan1_output).set_level(spd);
+              id(fan1_speed).publish_state(spd * 100.0f);
+
+    - platform: dallas_temp
+      one_wire_id: ow_bus_2
+      name: "Temperature 2"
+      id: temp_2
+      unit_of_measurement: "°C"
+      accuracy_decimals: 1
+      update_interval: 10s
+      on_value:
+        then:
+          - lambda: |-
+              float t = x;
+              float spd;
+              if (isnan(t))        spd = 1.00f;
+              else if (t <= 30.0f) spd = 0.20f;
+              else if (t >= 60.0f) spd = 1.00f;
+              else                 spd = 0.20f + (t - 30.0f) / 30.0f * 0.80f;
+              id(fan2_output).set_level(spd);
+              id(fan2_speed).publish_state(spd * 100.0f);
+
+    - platform: template
+      name: "Fan 1 Speed"
+      id: fan1_speed
+      unit_of_measurement: "%"
+      accuracy_decimals: 0
+      icon: "mdi:fan"
+
+    - platform: template
+      name: "Fan 2 Speed"
+      id: fan2_speed
+      unit_of_measurement: "%"
+      accuracy_decimals: 0
+      icon: "mdi:fan"
+
+  No secrets.yaml needed anymore since the api and ota blocks are gone. The only
+  HA-side requirement is a Zigbee coordinator with ZHA or Zigbee2MQTT
+  configured.
+
+> Thanks, now can you please generate an esphome yaml for an ESP32-H2 on zigbee
+  that allows a single relay to control my irrigation system?
+
+  Thought for 10s (ctrl+o to expand)
+
+● esphome:
+    name: irrigation-controller
+    friendly_name: Irrigation Controller
+
+  esp32:
+    board: esp32h2devkitm
+    variant: esp32h2
+    framework:
+      type: esp-idf
+
+  logger:
+    level: INFO
+
+  zigbee:
+    endpoints:
+      - num: 1
+        device_type: ON_OFF_OUTPUT
+        cluster_list:
+          - id: ON_OFF
+            attributes:
+              - attr_id: ON_OFF
+                value_ref: irrigation_relay
+
+  # ── Hardware
+  ──────────────────────────────────────────────────────────────────
+
+  switch:
+    - platform: gpio
+      pin: GPIO2
+      id: irrigation_relay
+      name: "Irrigation"
+      icon: "mdi:sprinkler"
+      restore_mode: RESTORE_DEFAULT_OFF
+      on_turn_on:
+        - logger.log: "Irrigation started — 30 min safety cutoff armed"
+        - delay: 30min
+        - switch.turn_off: irrigation_relay
+        - logger.log: "Irrigation auto-stopped by safety cutoff"
+
+  Assumed pinout:
+
+  ┌──────────────┬───────┐
+  │   Function   │ GPIO  │
+  ├──────────────┼───────┤
+  │ Relay signal │ GPIO2 │
+  └──────────────┴───────┘
+
+  ---
+
+  Two things worth calling out:
+
+  - Safety cutoff — the 30-minute auto-off on on_turn_on is intentional. If HA
+    loses the Zigbee connection mid-schedule, the valve won't run indefinitely.
+    Adjust the delay to suit your longest expected zone runtime, or remove it if
+    your HA automations already handle this.
+  - RESTORE_DEFAULT_OFF — the relay always starts off on power cycle, so a
+    controller reboot can't accidentally open the valve.
+
+> Is there a way to impose a fallback irrigation schedule that is embedded into
+  the script, that will take over if the ESP32-H2 cannot phone home to the
+  home assistant server?
+
+  Thought for 1m 11s (ctrl+o to expand)
+
+● Yes — the cleanest approach is a heartbeat watchdog: HA toggles a dedicated
+  switch every hour, and the device counts hours since the last ping. If the
+  count exceeds the threshold, a fallback schedule takes over.
+
+  Key limitation: The ESP32-H2 has no WiFi, so there's no NTP. Without a
+  hardware RTC module the device can't know the time of day — the fallback runs
+  on an interval (every 24h) rather than at a specific time like 6am.
+
+  ---
+
+  esphome:
+    name: irrigation-controller
+    friendly_name: Irrigation Controller
+
+  esp32:
+    board: esp32h2devkitm
+    variant: esp32h2
+    framework:
+      type: esp-idf
+
+  logger:
+    level: INFO
+
+  substitutions:
+    heartbeat_timeout_h: "25"   # Hours without HA contact before fallback
+  activates
+    fallback_interval_h: "24"   # Minimum hours between fallback irrigation runs
+    safety_cutoff: "30min"      # Maximum single run duration (both HA and
+  fallback)
+
+  zigbee:
+    endpoints:
+      - num: 1
+        device_type: ON_OFF_OUTPUT
+        cluster_list:
+          - id: ON_OFF
+            attributes:
+              - attr_id: ON_OFF
+                value_ref: irrigation_relay
+
+      # HA pings this every hour to prove it's alive; any state change resets
+  the counter
+      - num: 2
+        device_type: ON_OFF_OUTPUT
+        cluster_list:
+          - id: ON_OFF
+            attributes:
+              - attr_id: ON_OFF
+                value_ref: ha_heartbeat
+
+  globals:
+    - id: hours_no_heartbeat
+      type: int
+      restore_value: no
+      initial_value: '0'
+
+    - id: hours_since_watered
+      type: int
+      restore_value: no
+      initial_value: '0'
+
+  switch:
+    - platform: gpio
+      pin: GPIO2
+      id: irrigation_relay
+      name: "Irrigation"
+      icon: "mdi:sprinkler"
+      restore_mode: RESTORE_DEFAULT_OFF
+      on_turn_on:
+        - globals.set:
+            id: hours_since_watered
+            value: '0'
+        - logger.log: "Irrigation started"
+        - delay: $safety_cutoff
+        - switch.turn_off: irrigation_relay
+        - logger.log: "Irrigation stopped by safety cutoff"
+
+    - platform: template
+      name: "HA Heartbeat"
+      id: ha_heartbeat
+      optimistic: true
+      restore_mode: RESTORE_DEFAULT_OFF
+      on_turn_on:
+        - globals.set:
+            id: hours_no_heartbeat
+            value: '0'
+      on_turn_off:
+        - globals.set:
+            id: hours_no_heartbeat
+            value: '0'
+
+  interval:
+    - interval: 1h
+      then:
+        - lambda: |-
+            id(hours_no_heartbeat) += 1;
+            id(hours_since_watered) += 1;
+
+            if (id(hours_no_heartbeat) >= $heartbeat_timeout_h
+                && id(hours_since_watered) >= $fallback_interval_h
+                && !id(irrigation_relay).state) {
+              id(irrigation_relay).turn_on();
+            }
+
+  ---
+
+  Required HA automation
+
+  Add this to HA to keep the watchdog fed:
+
+  automation:
+    - alias: "Irrigation controller heartbeat"
+      trigger:
+        - platform: time_pattern
+          hours: "/1"
+      action:
+        - service: switch.toggle
+          target:
+            entity_id: switch.irrigation_controller_ha_heartbeat
+
+  ---
+
+  How it behaves
+
+  ┌──────────────────────┬──────────────────────────────────────────────────┐
+  │       Scenario       │                      Result                      │
+  ├──────────────────────┼──────────────────────────────────────────────────┤
+  │ HA online, sending   │ hours_no_heartbeat never reaches 25 — fallback   │
+  │ heartbeats           │ never fires                                      │
+  ├──────────────────────┼──────────────────────────────────────────────────┤
+  │ HA offline for 25h+  │ Fallback triggers; irrigates for up to 30min,    │
+  │                      │ then repeats every 24h                           │
+  ├──────────────────────┼──────────────────────────────────────────────────┤
+  │ HA comes back online │ Heartbeat resets counter; HA resumes normal      │
+  │                      │ control                                          │
+  ├──────────────────────┼──────────────────────────────────────────────────┤
+  │ Device reboots       │ Both counters reset to 0; fallback won't fire    │
+  │                      │ for at least 25h, giving HA time to reconnect    │
+  ├──────────────────────┼──────────────────────────────────────────────────┤
+  │ Relay already        │ !id(irrigation_relay).state guard prevents       │
+  │ running when         │ double-trigger                                   │
+  │ fallback checks      │                                                  │
+  └──────────────────────┴──────────────────────────────────────────────────┘
+
+  The three substitutions at the top are the only values you need to tune for
+  your setup.
+
+> Going back to the fan controller (with zigbee) config, is it possible to
+  amend this to have a hard coded temperature curve that can be adjusted via
+  home assistant, but the ESP32 falls back to the hard coded temperature curve
+  in the event that home assistant is unavailable?
+
+  Thought for 1m 46s (ctrl+o to expand)
+
+● Yes. The approach uses three adjustable number entities (persisted in flash)
+  for the curve parameters, plus the same heartbeat watchdog from the irrigation
+  config. When HA goes offline and the heartbeat times out, the numbers are
+  reset to the hardcoded substitutions defaults.
+
+  ---
+
+  substitutions:
+    # Hardcoded defaults — used on first boot and restored when HA is
+  unreachable
+    default_temp_low: "30.0"       # °C — fan ramping starts here
+    default_temp_high: "60.0"      # °C — fans hit 100% above this
+    default_fan_min_pct: "20.0"    # %  — minimum fan speed
+    heartbeat_timeout_h: "25"
+
+  esphome:
+    name: fan-controller
+    friendly_name: Fan Controller
+
+  esp32:
+    board: esp32h2devkitm
+    variant: esp32h2
+    framework:
+      type: esp-idf
+
+  logger:
+    level: INFO
+
+  zigbee:
+    endpoints:
+      - num: 1
+        device_type: TEMPERATURE_SENSOR
+        cluster_list:
+          - id: TEMP_MEASUREMENT
+            attributes:
+              - attr_id: MEASURED_VALUE
+                value_ref: temp_1
+
+      - num: 2
+        device_type: TEMPERATURE_SENSOR
+        cluster_list:
+          - id: TEMP_MEASUREMENT
+            attributes:
+              - attr_id: MEASURED_VALUE
+                value_ref: temp_2
+
+      # HA pings this every hour to prove it's alive
+      - num: 3
+        device_type: ON_OFF_OUTPUT
+        cluster_list:
+          - id: ON_OFF
+            attributes:
+              - attr_id: ON_OFF
+                value_ref: ha_heartbeat
+
+      # Writable curve parameters — standard Zigbee ANALOG_VALUE cluster
+  (0x000E)
+      # Note: verify your ESPHome version supports ANALOG_VALUE as a writable
+  cluster
+      - num: 4
+        device_type: ANALOG_VALUE
+        cluster_list:
+          - id: ANALOG_VALUE
+            attributes:
+              - attr_id: PRESENT_VALUE
+                value_ref: curve_temp_low
+
+      - num: 5
+        device_type: ANALOG_VALUE
+        cluster_list:
+          - id: ANALOG_VALUE
+            attributes:
+              - attr_id: PRESENT_VALUE
+                value_ref: curve_temp_high
+
+      - num: 6
+        device_type: ANALOG_VALUE
+        cluster_list:
+          - id: ANALOG_VALUE
+            attributes:
+              - attr_id: PRESENT_VALUE
+                value_ref: curve_fan_min_pct
+
+  # ── Hardware
+  ──────────────────────────────────────────────────────────────────
+
+  one_wire:
+    - platform: gpio
+      pin: GPIO4
+      id: ow_bus_1
+    - platform: gpio
+      pin: GPIO5
+      id: ow_bus_2
+
+  output:
+    - platform: ledc
+      pin: GPIO10
+      id: fan1_output
+      frequency: 25000Hz
+
+    - platform: ledc
+      pin: GPIO11
+      id: fan2_output
+      frequency: 25000Hz
+
+  # ── Adjustable curve parameters
+  ───────────────────────────────────────────────
+  # restore_value: true persists the last HA-set value to flash.
+  # On fallback, these are reset to the substitution defaults above.
+
+  number:
+    - platform: template
+      name: "Curve Temp Low"
+      id: curve_temp_low
+      unit_of_measurement: "°C"
+      min_value: 0
+      max_value: 80
+      step: 0.5
+      initial_value: $default_temp_low
+      optimistic: true
+      restore_value: true
+
+    - platform: template
+      name: "Curve Temp High"
+      id: curve_temp_high
+      unit_of_measurement: "°C"
+      min_value: 10
+      max_value: 100
+      step: 0.5
+      initial_value: $default_temp_high
+      optimistic: true
+      restore_value: true
+
+    - platform: template
+      name: "Fan Min Speed"
+      id: curve_fan_min_pct
+      unit_of_measurement: "%"
+      min_value: 0
+      max_value: 100
+      step: 5
+      initial_value: $default_fan_min_pct
+      optimistic: true
+      restore_value: true
+
+  # ── Heartbeat watchdog
+  ────────────────────────────────────────────────────────
+
+  globals:
+    - id: hours_no_heartbeat
+      type: int
+      restore_value: no
+      initial_value: '0'
+
+  switch:
+    - platform: template
+      name: "HA Heartbeat"
+      id: ha_heartbeat
+      optimistic: true
+      restore_mode: RESTORE_DEFAULT_OFF
+      on_turn_on:
+        - globals.set:
+            id: hours_no_heartbeat
+            value: '0'
+      on_turn_off:
+        - globals.set:
+            id: hours_no_heartbeat
+            value: '0'
+
+  interval:
+    - interval: 1h
+      then:
+        - lambda: |-
+            id(hours_no_heartbeat) += 1;
+        - if:
+            condition:
+              lambda: 'return id(hours_no_heartbeat) >= $heartbeat_timeout_h;'
+            then:
+              - number.set:
+                  id: curve_temp_low
+                  value: $default_temp_low
+              - number.set:
+                  id: curve_temp_high
+                  value: $default_temp_high
+              - number.set:
+                  id: curve_fan_min_pct
+                  value: $default_fan_min_pct
+              - logger.log: "HA unreachable — curve reset to hardcoded defaults"
+
+  # ── Sensors & fan control
+  ─────────────────────────────────────────────────────
+
+  sensor:
+    - platform: dallas_temp
+      one_wire_id: ow_bus_1
+      name: "Temperature 1"
+      id: temp_1
+      unit_of_measurement: "°C"
+      accuracy_decimals: 1
+      update_interval: 10s
+      on_value:
+        then:
+          - lambda: |-
+              float t     = x;
+              float t_low = id(curve_temp_low).state;
+              float t_high = id(curve_temp_high).state;
+              float f_min = id(curve_fan_min_pct).state / 100.0f;
+              float spd;
+              if (isnan(t))         spd = 1.00f;
+              else if (t <= t_low)  spd = f_min;
+              else if (t >= t_high) spd = 1.00f;
+              else                  spd = f_min + (t - t_low) / (t_high - t_low)
+  * (1.0f - f_min);
+              id(fan1_output).set_level(spd);
+              id(fan1_speed).publish_state(spd * 100.0f);
+
+    - platform: dallas_temp
+      one_wire_id: ow_bus_2
+      name: "Temperature 2"
+      id: temp_2
+      unit_of_measurement: "°C"
+      accuracy_decimals: 1
+      update_interval: 10s
+      on_value:
+        then:
+          - lambda: |-
+              float t     = x;
+              float t_low = id(curve_temp_low).state;
+              float t_high = id(curve_temp_high).state;
+              float f_min = id(curve_fan_min_pct).state / 100.0f;
+              float spd;
+              if (isnan(t))         spd = 1.00f;
+              else if (t <= t_low)  spd = f_min;
+              else if (t >= t_high) spd = 1.00f;
+              else                  spd = f_min + (t - t_low) / (t_high - t_low)
+  * (1.0f - f_min);
+              id(fan2_output).set_level(spd);
+              id(fan2_speed).publish_state(spd * 100.0f);
+
+    - platform: template
+      name: "Fan 1 Speed"
+      id: fan1_speed
+      unit_of_measurement: "%"
+      accuracy_decimals: 0
+      icon: "mdi:fan"
+
+    - platform: template
+      name: "Fan 2 Speed"
+      id: fan2_speed
+      unit_of_measurement: "%"
+      accuracy_decimals: 0
+      icon: "mdi:fan"
+
+  ---
+
+  Required HA automation
+
+  automation:
+    - alias: "Fan controller heartbeat"
+      trigger:
+        - platform: time_pattern
+          hours: "/1"
+      action:
+        - service: switch.toggle
+          target:
+            entity_id: switch.fan_controller_ha_heartbeat
+
+  ---
+
+  How the three states behave
+
+  ┌─────────────────────────┬──────────────────────────┬───────────────────┐
+  │          State          │       Curve source       │   Persisted to    │
+  │                         │                          │      flash?       │
+  ├─────────────────────────┼──────────────────────────┼───────────────────┤
+  │ First boot, HA never    │ substitutions defaults   │ Yes (initial      │
+  │ connected               │                          │ write)            │
+  ├─────────────────────────┼──────────────────────────┼───────────────────┤
+  │ HA online, custom       │ HA-adjusted numbers      │ Yes (on every     │
+  │ values set              │                          │ change)           │
+  ├─────────────────────────┼──────────────────────────┼───────────────────┤
+  │ HA offline < 25h        │ Last HA-set values       │ Already persisted │
+  ├─────────────────────────┼──────────────────────────┼───────────────────┤
+  │ HA offline ≥ 25h        │ Reset to substitutions   │ Yes (overwrites)  │
+  │                         │ defaults                 │                   │
+  ├─────────────────────────┼──────────────────────────┼───────────────────┤
+  │ Device reboots while HA │ Whatever was last        │ Restored from     │
+  │  offline                │ persisted                │ flash             │
+  └─────────────────────────┴──────────────────────────┴───────────────────┘
+
+  One caveat: the ANALOG_VALUE Zigbee cluster (endpoints 4–6) is a standard
+  Zigbee cluster designed for writable float values, but ESPHome's Zigbee
+  component is still maturing — verify it compiles cleanly against your
+  installed ESPHome version before deploying.
+
+> can you please explain how the code works in relation to the temperature
+  curve and fan speed mechanism
+
+  Thought for 3s (ctrl+o to expand)
+
+● The four curve parameters
+
+  The shape of the curve is defined by four values:
+
+  substitutions:
+    default_temp_low: "30.0"     # point A — where ramping begins
+    default_temp_high: "60.0"    # point B — where fans hit 100%
+    default_fan_min_pct: "20.0"  # floor speed (never drops below this)
+                                 # ceiling is implicitly always 100%
+
+  Plotted, it looks like this:
+
+  100% |                        ,----------
+       |                   ,---'
+       |               ,--'
+   20% |  ,-----------'
+       |
+       +--+----------+-----------+----------> °C
+          0         30          60
+
+  ---
+
+  What happens on every temperature reading
+
+  Every 10 seconds each DS18B20 fires on_value, which runs this lambda (same
+  logic for both fans):
+
+  float t     = x;                              // current temperature reading
+  float t_low = id(curve_temp_low).state;       // 30.0 by default
+  float t_high = id(curve_temp_high).state;     // 60.0 by default
+  float f_min = id(curve_fan_min_pct).state / 100.0f;  // 0.20 by default
+
+  Then one of four branches decides the output level:
+
+  if (isnan(t))         spd = 1.00f;   // ① sensor fault → full speed (failsafe)
+  else if (t <= t_low)  spd = f_min;   // ② below ramp → minimum speed (0.20)
+  else if (t >= t_high) spd = 1.00f;   // ③ above ramp → full speed (1.00)
+  else                  spd = f_min + (t - t_low) / (t_high - t_low) * (1.0f -
+  f_min);
+                                        // ④ within ramp → linear interpolation
+
+  Branch ④ is the core formula. Breaking it down with concrete numbers (t =
+  45°C, defaults):
+
+  (t - t_low)               = 45 - 30  = 15      ← how far into the ramp you are
+  (t_high - t_low)          = 60 - 30  = 30      ← total ramp width
+  ratio                     = 15 / 30  = 0.50    ← 50% of the way through the
+  ramp
+  (1.0 - f_min)             = 1.0 - 0.20 = 0.80  ← available headroom above
+  minimum
+  spd = 0.20 + 0.50 * 0.80  = 0.20 + 0.40 = 0.60 → 60%
+
+  ---
+
+  How that percentage becomes actual fan speed
+
+  The spd value (0.0–1.0) is passed directly to the LEDC output:
+
+  id(fan1_output).set_level(spd);
+
+  LEDC (the ESP32's hardware PWM peripheral) translates this into a 25 kHz PWM
+  signal where the duty cycle matches spd. A 4-pin PC fan reads that duty cycle
+  on its dedicated PWM pin and sets its motor speed accordingly — 0.60 → 60%
+  duty cycle → fan runs at ~60% of max RPM.
+
+  25 kHz PWM at 60% duty:
+  |‾‾‾‾‾‾|    |‾‾‾‾‾‾|    |‾‾
+  |      |    |      |    |
+  +------+----+------+----+--
+    60%   40%   60%   40%
+
+  ---
+
+  What HA can change at runtime
+
+  Because the curve parameters are number entities with restore_value: true, HA
+  can write new values to them via Zigbee at any time. The lambda always reads
+  them live from .state, so the new curve takes effect on the very next
+  temperature reading — no reboot needed.
+
+  If HA goes offline for 25+ hours the heartbeat watchdog fires number.set to
+  push all three parameters back to the substitutions defaults, which also
+  overwrites the flash — so a reboot while HA is still offline starts up with
+  the safe defaults rather than the last HA-customised values.
+
+> the default temperature curve seems bumpy - is it possible to make it operate
+  more smoothly?
+
+  Thought for 21s (ctrl+o to expand)
+
+● The current linear ramp has two sharp corners — at 30°C where it transitions
+  from flat-to-ramping, and at 60°C where it transitions from ramping-to-flat.
+  Those are points where the rate of change snaps suddenly, which the fans feel
+  as abrupt speed changes.
+
+  Current (linear):          Smoothstep:
+
+  100% |         ,-------    100% |           ,-------
+       |        /                 |         ,'
+       |       /                  |       ,'
+       |      /                   |     ,'
+   20% |-----'                20% |---,'
+       |                          |
+       +---+------+------->        +---+------+------->
+          30     60                   30     60
+           ^ corner                    ^ smooth
+
+  The fix is smoothstep — a standard S-curve formula that eases in and out at
+  both endpoints, giving zero slope at the transition points so there are no
+  corners at all.
+
+  Only the lambda changes. Replace it in both sensor blocks:
+
+  float t     = x;
+  float t_low = id(curve_temp_low).state;
+  float t_high = id(curve_temp_high).state;
+  float f_min = id(curve_fan_min_pct).state / 100.0f;
+  float spd;
+
+  if (isnan(t)) {
+      spd = 1.00f;
+  } else {
+      // Clamp temperature to the 0..1 range between the two setpoints
+      float norm = (t - t_low) / (t_high - t_low);
+      norm = fmaxf(0.0f, fminf(1.0f, norm));
+      // Smoothstep: 3t² - 2t³  — zero slope at both endpoints
+      float curve = norm * norm * (3.0f - 2.0f * norm);
+      spd = f_min + curve * (1.0f - f_min);
+  }
+
+  id(fanX_output).set_level(spd);
+  id(fanX_speed).publish_state(spd * 100.0f);
+
+  The clamp + smoothstep approach also removes the three if/else branches from
+  the original — the clamp handles the boundary cases implicitly, so the code is
+  shorter as well as smoother.
+
+  ---
+
+  How the smoothstep formula behaves at key points:
+
+  ┌─────────────┬──────┬───────┬─────────────────────┐
+  │ Temperature │ norm │ curve │ Fan speed (20% min) │
+  ├─────────────┼──────┼───────┼─────────────────────┤
+  │ ≤ 30°C      │ 0.00 │ 0.000 │ 20%                 │
+  ├─────────────┼──────┼───────┼─────────────────────┤
+  │ 35°C        │ 0.17 │ 0.069 │ 25%                 │
+  ├─────────────┼──────┼───────┼─────────────────────┤
+  │ 45°C        │ 0.50 │ 0.500 │ 60%                 │
+  ├─────────────┼──────┼───────┼─────────────────────┤
+  │ 55°C        │ 0.83 │ 0.931 │ 95%                 │
+  ├─────────────┼──────┼───────┼─────────────────────┤
+  │ ≥ 60°C      │ 1.00 │ 1.000 │ 100%                │
+  └─────────────┴──────┴───────┴─────────────────────┘
+
+  The midpoint (45°C) still maps to 60%, same as before — the curve is
+  symmetric, just with rounded shoulders instead of sharp corners.
+
+> Does this smoothstep change also apply for HA dictated variables?
+
+● Yes, it applies automatically regardless of where the curve parameters come
+  from.
+
+  The lambda reads the curve parameters at runtime via .state on every
+  temperature reading:
+
+  float t_low = id(curve_temp_low).state;
+  float t_high = id(curve_temp_high).state;
+  float f_min  = id(curve_fan_min_pct).state / 100.0f;
+
+  Whether those values were set by:
+  - First boot — from the substitutions defaults
+  - HA via Zigbee — written to the number entities
+  - Heartbeat fallback — reset by number.set back to defaults
+
+  ...the smoothstep formula is applied to whatever values it finds. The curve
+  shape is always an S-curve; only the position and width of that S-curve
+  changes based on where curve_temp_low and curve_temp_high are set.
+
+  The only thing HA controls is where the S-curve sits on the temperature axis,
+  not what shape it is — that's baked into the lambda itself.
+
+> I want to go back to the irrigation (with zigbee) config. Is it possible for
+  the following to be accommodated:
+  ** the duration and frequency of each irrigation session to be primarily
+  dictated by home assistant
+  ** however, but with a safety fallback schedule of once per day for 5 minutes
+  applies
+  ** but in all cases the maximum duration for an irrigation session cannot
+  exceed 10 minutes?
+
+  Thought for 41s (ctrl+o to expand)
+
+● The cleanest way to handle this is with two ESPHome script components — one
+  for the hard cap (always running when the relay is on), one for the fallback
+  session (runs for 5 min then stops). They interact safely without conflicts.
+
+  ---
+
+  substitutions:
+    fallback_duration: "5min"
+    max_duration: "10min"
+    heartbeat_timeout_h: "25"
+    fallback_interval_h: "24"
+
+  esphome:
+    name: irrigation-controller
+    friendly_name: Irrigation Controller
+
+  esp32:
+    board: esp32h2devkitm
+    variant: esp32h2
+    framework:
+      type: esp-idf
+
+  logger:
+    level: INFO
+
+  zigbee:
+    endpoints:
+      - num: 1
+        device_type: ON_OFF_OUTPUT
+        cluster_list:
+          - id: ON_OFF
+            attributes:
+              - attr_id: ON_OFF
+                value_ref: irrigation_relay
+
+      - num: 2
+        device_type: ON_OFF_OUTPUT
+        cluster_list:
+          - id: ON_OFF
+            attributes:
+              - attr_id: ON_OFF
+                value_ref: ha_heartbeat
+
+  globals:
+    - id: hours_no_heartbeat
+      type: int
+      restore_value: no
+      initial_value: '0'
+
+    - id: hours_since_watered
+      type: int
+      restore_value: no
+      initial_value: '0'
+
+  script:
+    # Arms whenever the relay turns on — enforces the absolute 10-min ceiling
+    # mode: restart means if HA turns the relay off and on again, the timer
+  resets
+    - id: max_duration_cap
+      mode: restart
+      then:
+        - delay: $max_duration
+        - switch.turn_off: irrigation_relay
+        - logger.log: "Irrigation stopped by 10-min hard cap"
+
+    # Fallback session — 5 min then stops; max_duration_cap still active as
+  backstop
+    # mode: single prevents stacking if the interval fires while already running
+    - id: fallback_irrigation
+      mode: single
+      then:
+        - logger.log: "Fallback irrigation started"
+        - switch.turn_on: irrigation_relay
+        - delay: $fallback_duration
+        - switch.turn_off: irrigation_relay
+        - logger.log: "Fallback irrigation complete"
+
+  switch:
+    - platform: gpio
+      pin: GPIO2
+      id: irrigation_relay
+      name: "Irrigation"
+      icon: "mdi:sprinkler"
+      restore_mode: RESTORE_DEFAULT_OFF
+      on_turn_on:
+        - globals.set:
+            id: hours_since_watered
+            value: '0'
+        - script.execute: max_duration_cap   # arms the hard cap
+      on_turn_off:
+        - script.stop: max_duration_cap      # disarms the hard cap cleanly
+
+    - platform: template
+      name: "HA Heartbeat"
+      id: ha_heartbeat
+      optimistic: true
+      restore_mode: RESTORE_DEFAULT_OFF
+      on_turn_on:
+        - globals.set:
+            id: hours_no_heartbeat
+            value: '0'
+      on_turn_off:
+        - globals.set:
+            id: hours_no_heartbeat
+            value: '0'
+
+  interval:
+    - interval: 1h
+      then:
+        - lambda: |-
+            id(hours_no_heartbeat) += 1;
+            id(hours_since_watered) += 1;
+        - if:
+            condition:
+              lambda: |-
+                return id(hours_no_heartbeat) >= $heartbeat_timeout_h
+                    && id(hours_since_watered) >= $fallback_interval_h
+                    && !id(irrigation_relay).state;
+            then:
+              - script.execute: fallback_irrigation
+
+  ---
+
+  How the three rules interact
+
+  HA-controlled sessions — HA turns the relay on and off freely. The moment the
+  relay turns on, max_duration_cap arms itself. If HA turns it off before 10
+  minutes, on_turn_off cancels the cap cleanly. If HA forgets or crashes
+  mid-session, the cap fires at 10 minutes regardless.
+
+  Fallback sessions — when the heartbeat has been silent for 25+ hours and it's
+  been 24+ hours since last watering, fallback_irrigation fires. It turns the
+  relay on (which arms max_duration_cap), waits 5 minutes, then turns the relay
+  off (which disarms max_duration_cap). Both the 5-min target and the 10-min
+  backstop are active simultaneously — whichever fires first wins, but in normal
+  conditions the 5-min always wins.
+
+  Hard cap — applies unconditionally to both paths. The relay physically cannot
+  stay on for more than 10 minutes regardless of what triggered it.
+
+  ┌────────────────────────────────┬─────────────────────┬─────────────────┐
+  │            Scenario            │     Who stops       │ After how long  │
+  │                                │     irrigation      │                 │
+  ├────────────────────────────────┼─────────────────────┼─────────────────┤
+  │ HA-controlled, HA turns off    │ HA                  │ HA's chosen     │
+  │ normally                       │                     │ duration        │
+  ├────────────────────────────────┼─────────────────────┼─────────────────┤
+  │ HA-controlled, HA goes silent  │ max_duration_cap    │ 10 min from     │
+  │ mid-session                    │                     │ turn-on         │
+  ├────────────────────────────────┼─────────────────────┼─────────────────┤
+  │ Fallback session, completes    │ fallback_irrigation │ 5 min           │
+  │ normally                       │                     │                 │
+  ├────────────────────────────────┼─────────────────────┼─────────────────┤
+  │ Fallback session, script       │ max_duration_cap    │ 10 min from     │
+  │ somehow hangs                  │                     │ turn-on         │
+  └────────────────────────────────┴─────────────────────┴─────────────────┘
+
+> can you please modify this so that the fallback safety schedule is 2 times a
+  day at 3 minutes each
+
+  Thought for 8s (ctrl+o to expand)
+
+● Only two substitution values change — the rest of the config is identical:
+
+  substitutions:
+    fallback_duration: "3min"    # was 5min
+    max_duration: "10min"
+    heartbeat_timeout_h: "25"
+    fallback_interval_h: "12"    # was 24 — every 12 hours = twice per day
+
+  The interval logic already handles this correctly — it fires the fallback
+  whenever hours_since_watered >= fallback_interval_h, so dropping that
+  threshold from 24 to 12 naturally produces two sessions per day spaced ~12
+  hours apart.
+
+  The same caveat from before applies: without an RTC the device has no concept
+  of time-of-day, so the two sessions are spaced 12 hours apart from whenever
+  the fallback first triggered after boot, not at fixed clock times like
+  6am/6pm. If specific times matter, a DS3231 RTC module (I2C) would be needed.
+
+> can you please output the consolidated config to a file called
+  esphome-esp32h2-irrigation.yaml
+
+  Thought for 3s (ctrl+o to expand)
+
+● Write(esphome-esp32h2-irrigation.yaml)
+  ⎿  Wrote 112 lines to esphome-esp32h2-irrigation.yaml
+      1 substitutions:
+      2   fallback_duration: "3min"
+      3   max_duration: "10min"
+      4   heartbeat_timeout_h: "25"
+      5   fallback_interval_h: "12"
+      6
+      7 esphome:
+      8   name: irrigation-controller
+      9   friendly_name: Irrigation Controller
+     … +106 lines (ctrl+o to expand)
+
+● Written to esphome-esp32h2-irrigation.yaml
+  (C:\Users\I570525\esphome-esp32h2-irrigation.yaml). All changes from this
+  conversation are included: Zigbee connectivity, HA-controlled relay, heartbeat
+  watchdog, 10-minute hard cap, and the 2×3-minute fallback schedule.
+
+> can you please confirm whether the fan controller config operates on the
+  basis that the relay is in a normally closed position (ie the relay only
+  disconnects the circuit if instructed to do so by home assistant)
+  Thought for 13s (ctrl+o to expand)
+
+● No — the config does not assume normally closed. Here is exactly what the
+  config specifies:
+
+  switch:
+    - platform: gpio
+      pin: GPIO2
+      id: relay
+      name: "Relay"
+      restore_mode: RESTORE_DEFAULT_OFF
+
+  RESTORE_DEFAULT_OFF means the GPIO pin starts LOW on every boot, which
+  de-energizes the relay coil. What that means for your circuit depends entirely
+  on which relay terminals you wire to:
+
+  ┌──────────────────┬────────────────────────────┬────────────────────────┐
+  │      Wiring      │     Coil de-energized      │  Coil energized (HA    │
+  │                  │       (boot/default)       │       turns on)        │
+  ├──────────────────┼────────────────────────────┼────────────────────────┤
+  │ NO (normally     │ Circuit open               │ Circuit closed         │
+  │ open)            │                            │                        │
+  ├──────────────────┼────────────────────────────┼────────────────────────┤
+  │ NC (normally     │ Circuit closed             │ Circuit open           │
+  │ closed)          │                            │                        │
+  └──────────────────┴────────────────────────────┴────────────────────────┘
+
+  The config controls the GPIO state only — it has no knowledge of the physical
+  wiring.
+
+  ---
+
+  If you want NC behaviour where HA disconnects the circuit on command, the
+  config already supports this as written — you just wire to the NC terminals on
+  the relay module. No code change needed.
+
+  However, if that is your intent it may be worth reconsidering restore_mode.
+  Currently on a power cycle the coil de-energizes, which on NC wiring means the
+  circuit re-closes automatically on reboot. Depending on what is connected,
+  that may or may not be desirable. The available options are:
+
+  ┌─────────────────────┬────────────────────────────────────────────────────┐
+  │    restore_mode     │                 Behaviour on boot                  │
+  ├─────────────────────┼────────────────────────────────────────────────────┤
+  │ RESTORE_DEFAULT_OFF │ GPIO LOW → coil de-energized → NC contacts closed  │
+  ├─────────────────────┼────────────────────────────────────────────────────┤
+  │ RESTORE_DEFAULT_ON  │ GPIO HIGH → coil energized → NC contacts open      │
+  ├─────────────────────┼────────────────────────────────────────────────────┤
+  │ ALWAYS_OFF          │ Same as above but ignores any previously saved     │
+  │                     │ state                                              │
+  ├─────────────────────┼────────────────────────────────────────────────────┤
+  │ ALWAYS_ON           │ Same as above but ignores any previously saved     │
+  │                     │ state                                              │
+  └─────────────────────┴────────────────────────────────────────────────────┘
+
+  Would you like to adjust the restore_mode to match your intended behaviour?
+
+> I would like the relay to disconnect to an open position ONLY if instructed
+  to do so by home assistant. In all other situations (including if the esp
+  circuit somehow loses power) the circuit should remain closed. Is this
+  possible?
+
+  Thought for 20s (ctrl+o to expand)
+
+● Yes, this is achievable with one hardware change and one config change.
+
+  Hardware: wire to the NC terminals on the relay module (not NO).
+
+  Config: change restore_mode from RESTORE_DEFAULT_OFF to ALWAYS_OFF:
+
+  switch:
+    - platform: gpio
+      pin: GPIO2
+      id: relay
+      name: "Relay"
+      icon: "mdi:electric-switch"
+      restore_mode: ALWAYS_OFF    # was RESTORE_DEFAULT_OFF
+
+  ---
+
+  RESTORE_DEFAULT_OFF is not sufficient here — it tries to restore the last
+  saved state, so if HA had opened the circuit before a power cut it could
+  restore to open on reboot. ALWAYS_OFF guarantees GPIO is always LOW on every
+  boot regardless of any previously saved state.
+
+  With NC wiring and ALWAYS_OFF, the full behaviour matrix is:
+
+  ┌───────────────────────┬──────┬──────────────┬────────────┬──────────────┐
+  │       Situation       │ GPIO │     Coil     │    NC      │   Circuit    │
+  │                       │      │              │  contacts  │              │
+  ├───────────────────────┼──────┼──────────────┼────────────┼──────────────┤
+  │ Boot / power restored │ LOW  │ De-energized │ Closed     │ Connected    │
+  ├───────────────────────┼──────┼──────────────┼────────────┼──────────────┤
+  │ Power lost            │ —    │ De-energized │ Closed     │ Connected    │
+  ├───────────────────────┼──────┼──────────────┼────────────┼──────────────┤
+  │ HA instructs          │ HIGH │ Energized    │ Open       │ Disconnected │
+  │ disconnect            │      │              │            │              │
+  ├───────────────────────┼──────┼──────────────┼────────────┼──────────────┤
+  │ HA instructs          │ LOW  │ De-energized │ Closed     │ Connected    │
+  │ reconnect             │      │              │            │              │
+  └───────────────────────┴──────┴──────────────┴────────────┴──────────────┘
+
+  One thing worth noting: with NC wiring, the switch semantics in HA are
+  inverted — turning the switch ON opens the circuit (disconnects), and turning
+  it OFF closes it (reconnects). This is standard NC relay behaviour but can be
+  surprising in an HA dashboard. You may want to rename the entity to something
+  like "Disconnect Circuit" to make the intent clear.
+
+> Is it possible to also set a maximum disconnection time (say 30 seconds) so
+  that home assistant only has to issue a single command to open the circuit,
+  and does not need to do any more to close it again.
+
+  Thought for 15s (ctrl+o to expand)
+
+● Yes — the same script pattern from the irrigation config applies here. Only
+  three things change:
+
+  Add a substitution:
+  substitutions:
+    relay_max_disconnect: "30s"
+
+  Add a script:
+  script:
+    - id: auto_reconnect
+      mode: restart   # if HA sends a second open command within 30s, timer
+  resets
+      then:
+        - delay: $relay_max_disconnect
+        - switch.turn_off: relay
+
+  Update the switch:
+  switch:
+    - platform: gpio
+      pin: GPIO2
+      id: relay
+      name: "Relay"
+      icon: "mdi:electric-switch"
+      restore_mode: ALWAYS_OFF
+      on_turn_on:
+        - script.execute: auto_reconnect   # arms the 30s timer
+      on_turn_off:
+        - script.stop: auto_reconnect      # disarms cleanly if closed early
+
+  ---
+
+  The behaviour in each scenario:
+
+  ┌───────────────────────────┬─────────────────────────────────────────────┐
+  │         Scenario          │                   Result                    │
+  ├───────────────────────────┼─────────────────────────────────────────────┤
+  │ HA sends open command     │ Circuit opens; closes automatically after   │
+  │                           │ 30s                                         │
+  ├───────────────────────────┼─────────────────────────────────────────────┤
+  │ HA sends open, then close │ Closes immediately; timer cancelled cleanly │
+  │  before 30s               │                                             │
+  ├───────────────────────────┼─────────────────────────────────────────────┤
+  │ HA sends open twice       │ Timer resets on second command; closes 30s  │
+  │ within 30s                │ after the last one                          │
+  ├───────────────────────────┼─────────────────────────────────────────────┤
+  │ Power lost at any point   │ Circuit closes (NC wiring + ALWAYS_OFF)     │
+  └───────────────────────────┴─────────────────────────────────────────────┘
+
+  HA only ever needs to issue the one open command — the device handles the
+  close automatically.
+
+> can you please output the consolidated config to a file called
+  esphome-esp32h2-fancontroller.yaml. Please include comments to make it easier
+  to follow the code
+
+  Thought for 48s (ctrl+o to expand)
+
+● Write(esphome-esp32h2-fancontroller.yaml)
+  ⎿  Wrote 368 lines to esphome-esp32h2-fancontroller.yaml
+       1 # ──────────────────────────────────────────────────────────────
+       2 # ESPHome Fan Controller — ESP32-H2 (Zigbee)
+       3 #
+       5 #   GPIO4  — DS18B20 sensor 1 (1-Wire; fit 4.7kΩ pull-up to 3.3V
+       6 #   GPIO5  — DS18B20 sensor 2 (1-Wire; fit 4.7kΩ pull-up to 3.3V
+          externally)
+         PC fan header)
+       8 #   GPIO11 — Fan 2 PWM signal (25 kHz; wire to PWM pin of 4-pin
+       9 #   GPIO2  — Relay signal     (wire to NC terminals — circuit cl
+      10 #
+     … +429 lines (ctrl+o to expand)
+
+● Written to esphome-esp32h2-fancontroller.yaml
+  (C:\Users\I570525\esphome-esp32h2-fancontroller.yaml). All changes from this
+  conversation are included:
+
+  - Zigbee connectivity with all 7 endpoints
+  - Dual DS18B20 sensors each controlling their corresponding fan
+  - Smoothstep temperature curve
+  - HA-adjustable curve parameters with flash persistence and heartbeat fallback
+  - NC relay wiring with ALWAYS_OFF, single-command open, and 30-second
+    auto-reconnect
+  - Comments throughout explaining the why behind non-obvious decisions, with
+    the required HA heartbeat automation included as a commented reference at
+    the bottom
+
+> can you also update the irrigation file to include similar explanatory
+  comments
+
+  Thought for 5s, read 1 file (ctrl+o to expand)
+
+● Write(esphome-esp32h2-irrigation.yaml)
+  ⎿  Added 89 lines, removed 5 lines
+       1 +# ─────────────────────────────────────────────────────────────
+         +─────────────────                                              
+       2 +# ESPHome Irrigation Controller — ESP32-H2 (Zigbee)            
+       3 +#                                                              
+       4 +# Pinout:                                                      
+       5 +#   GPIO2 — Relay signal (wire to NO terminals on relay module;
+         + use a relay                                                   
+       6 +#            module or transistor driver — do not connect mains
+         + loads directly                                                
+       7 +#            to the GPIO pin)                                  
+       8 +#                                                              
+       9 +# Connectivity:                                                
+      10 +#   ESP32-H2 has no WiFi. HA connects via Zigbee (IEEE 802.15.4
+         +). Requires a                                                  
+      11 +#   Zigbee coordinator (e.g. Sonoff Dongle Plus) with ZHA or Zi
+         +gbee2MQTT.                                                     
+      12 +#                                                              
+      13 +# Zigbee endpoints:                                            
+      14 +#   1 — Irrigation relay (ON_OFF; HA turns ON to irrigate)     
+      15 +#   2 — HA Heartbeat     (ON_OFF; HA toggles this hourly — see 
+         +automation below)                                              
+      16 +#                                                              
+      17 +# Session behaviour:                                           
+      18 +#   - HA controls duration and frequency during normal operatio
+         +n                                                              
+      19 +#   - If HA is unreachable for > 25 hours, a fallback schedule 
+         +activates:                                                     
+      20 +#     two sessions per day (every 12 hours), each 3 minutes lon
+         +g                                                              
+      21 +#   - No single session can exceed 10 minutes regardless of tri
+         +gger source                                                    
+      22 +# ─────────────────────────────────────────────────────────────
+         +─────────────────                                              
+      23 +                                                               
+      24  substitutions:
+      25 +  # Duration of each fallback irrigation session when HA is unr
+         +eachable                                                       
+      26    fallback_duration: "3min"
+      27 +                                                               
+      28 +  # Absolute maximum duration for any single session, whether t
+         +riggered by HA                                                 
+      29 +  # or the fallback schedule. Acts as a safety net against stuc
+         +k-open valves.                                                 
+      30    max_duration: "10min"
+      31 +                                                               
+      32 +  # Hours of silence from HA before the fallback schedule activ
+         +ates                                                           
+      33    heartbeat_timeout_h: "25"
+      34 +                                                               
+      35 +  # Minimum hours between fallback sessions (24 hours / this va
+         +lue = sessions                                                 
+      36 +  # per day; 12 = twice per day)                               
+      37    fallback_interval_h: "12"
+      38  
+      39  esphome:
+     ...
+      44    board: esp32h2devkitm
+      45    variant: esp32h2
+      46    framework:
+      15 -    type: esp-idf                                              
+      47 +    type: esp-idf   # required for ESP32-H2; Arduino framework 
+         +is not supported                                               
+      48  
+      49  logger:
+      50    level: INFO
+      51  
+      52 +# ── Zigbee ───────────────────────────────────────────────────
+         +─────────────────                                              
+      53 +                                                               
+      54  zigbee:
+      55    endpoints:
+      56 +    # HA turns this ON to begin an irrigation session. The devi
+         +ce turns it OFF                                                
+      57 +    # automatically either after HA's chosen duration or at the
+         + 10-min hard cap,                                              
+      58 +    # whichever comes first.                                   
+      59      - num: 1
+      60        device_type: ON_OFF_OUTPUT
+      61        cluster_list:
+     ...
+      64              - attr_id: ON_OFF
+      65                value_ref: irrigation_relay
+      66  
+      67 +    # HA must toggle this every hour to prove it is reachable. 
+         +Either transition                                              
+      68 +    # (on→off or off→on) counts as a valid heartbeat ping.     
+      69      - num: 2
+      70        device_type: ON_OFF_OUTPUT
+      71        cluster_list:
+     ...
+       74              - attr_id: ON_OFF
+       75                value_ref: ha_heartbeat
+       76  
+       77 +# ── Globals ─────────────────────────────────────────────────
+          +──────────────────                                            
+       78 +                                                              
+       79  globals:
+       80 +  # Counts hours elapsed since the last heartbeat from HA. Res
+          +et to 0 on any                                                
+       81 +  # heartbeat toggle. Not persisted to flash — resets on reboo
+          +t, giving HA                                                  
+       82 +  # time to reconnect before the fallback schedule activates. 
+       83    - id: hours_no_heartbeat
+       84      type: int
+       85      restore_value: no
+       86      initial_value: '0'
+       87  
+       88 +  # Counts hours elapsed since irrigation last ran (either HA 
+          +or fallback).                                                 
+       89 +  # Prevents the fallback from running more frequently than fa
+          +llback_interval_h.                                            
+       90 +  # Not persisted — resets on reboot, which is safe: the fallb
+          +ack will not                                                  
+       91 +  # trigger for at least heartbeat_timeout_h hours after boot 
+          +regardless.                                                   
+       92    - id: hours_since_watered
+       93      type: int
+       94      restore_value: no
+       95      initial_value: '0'
+       96  
+       97 +# ── Scripts ─────────────────────────────────────────────────
+          +──────────────────                                            
+       98 +                                                              
+       99  script:
+       50 -  # Arms whenever the relay turns on — enforces the absolute 1
+          -0-min ceiling                                                 
+       51 -  # mode: restart means if HA turns the relay off and on again
+          -, the timer resets                                            
+      100 +  # Hard cap — armed automatically whenever the relay turns on
+          +, cancelled when                                              
+      101 +  # it turns off. Applies to both HA-triggered and fallback se
+          +ssions.                                                       
+      102 +  # mode: restart means if the relay is turned off and on agai
+          +n mid-session,                                                
+      103 +  # the 10-minute timer resets rather than carrying over from 
+          +the previous run.                                             
+      104    - id: max_duration_cap
+      105      mode: restart
+      106      then:
+     ...
+      108        - switch.turn_off: irrigation_relay
+      109        - logger.log: "Irrigation stopped by 10-min hard cap"
+      110  
+       59 -  # Fallback session — 3 min then stops; max_duration_cap stil
+          -l active as backstop                                          
+       60 -  # mode: single prevents stacking if the interval fires while
+          - already running                                              
+      111 +  # Fallback session — runs for fallback_duration then stops. 
+          +The max_duration_cap                                          
+      112 +  # script is still active in parallel as a backstop in case t
+          +his script hangs.                                             
+      113 +  # mode: single prevents sessions stacking if the hourly inte
+          +rval fires while                                              
+      114 +  # a session is already in progress.                         
+      115    - id: fallback_irrigation
+      116      mode: single
+      117      then:
+     ...
+      121        - switch.turn_off: irrigation_relay
+      122        - logger.log: "Fallback irrigation complete"
+      123  
+      124 +# ── Switches ────────────────────────────────────────────────
+          +──────────────────                                            
+      125 +                                                              
+      126  switch:
+      127 +  # Irrigation relay — RESTORE_DEFAULT_OFF ensures the valve s
+          +tarts closed on                                               
+      128 +  # every boot so a power cut cannot leave water running. on_t
+          +urn_on resets the                                             
+      129 +  # hours_since_watered counter (so the fallback interval rest
+          +arts from zero)                                               
+      130 +  # and arms the hard cap timer. on_turn_off cancels the timer
+          + cleanly whether                                              
+      131 +  # the relay was closed by HA, the fallback script, or the ha
+          +rd cap itself.                                                
+      132    - platform: gpio
+      133      pin: GPIO2
+      134      id: irrigation_relay
+     ...
+      143      on_turn_off:
+      144        - script.stop: max_duration_cap
+      145  
+      146 +  # Heartbeat — HA toggles this every hour via an automation. 
+          +Any state change                                              
+      147 +  # resets hours_no_heartbeat to 0. If the counter reaches hea
+          +rtbeat_timeout_h                                              
+      148 +  # without a toggle, the interval block activates the fallbac
+          +k schedule.                                                   
+      149    - platform: template
+      150      name: "HA Heartbeat"
+      151      id: ha_heartbeat
+     ...
+      160            id: hours_no_heartbeat
+      161            value: '0'
+      162  
+      163 +# ── Heartbeat watchdog & fallback schedule ──────────────────
+          +──────────────────                                            
+      164 +                                                              
+      165  interval:
+      166    - interval: 1h
+      167      then:
+     ...
+      171        - if:
+      172            condition:
+      173              lambda: |-
+      174 +              // All three conditions must be true to trigger 
+          +a fallback session:                                           
+      175 +              // 1. HA has been silent for longer than the tim
+          +eout threshold                                                
+      176 +              // 2. Enough time has passed since the last irri
+          +gation session                                                
+      177 +              // 3. The relay is not already open (prevents do
+          +uble-triggering)                                              
+      178                return id(hours_no_heartbeat) >= $heartbeat_time
+           out_h
+      179                    && id(hours_since_watered) >= $fallback_inte
+           rval_h
+      180                    && !id(irrigation_relay).state;
+      181            then:
+      182              - script.execute: fallback_irrigation
+      183 +                                                              
+      184 +# ── Required HA automation ──────────────────────────────────
+          +──────────────────                                            
+      185 +# Add the following automation to Home Assistant to keep the h
+          +eartbeat watchdog                                             
+      186 +# fed. Without it, the fallback schedule will activate after 2
+          +5 hours.                                                      
+      187 +#                                                             
+      188 +# automation:                                                 
+      189 +#   - alias: "Irrigation controller heartbeat"                
+      190 +#     trigger:                                                
+      191 +#       - platform: time_pattern                              
+      192 +#         hours: "/1"                                         
+      193 +#     action:                                                 
+      194 +#       - service: switch.toggle                              
+      195 +#         target:                                             
+      196 +#           entity_id: switch.irrigation_controller_ha_heartbe
+          +at                                                            
+
+● esphome-esp32h2-irrigation.yaml
+  (C:\Users\I570525\esphome-esp32h2-irrigation.yaml) updated. Comments follow
+  the same pattern as the fan controller file:
+
+  - Header block with pinout, connectivity, endpoint map, and behavioural
+    summary
+  - Substitutions annotated with what each value controls and why it exists
+  - Each script, switch, and global explains the reasoning behind its mode,
+    restore_mode, and interaction with other components
+  - The three-condition fallback check in the interval is broken out with
+    numbered inline comments
+  - Required HA automation included as a commented reference at the bottom
+
+> Can you please advise if there is a power-on risk with the relay in the fan
+  controller config?
+
+● Yes — there is a meaningful difference between the two configs worth flagging.
+
+  The irrigation config uses RESTORE_DEFAULT_OFF, which is appropriate because
+  the relay is wired to NO terminals. On power-on the coil is de-energized, NO
+  contacts stay open, valve stays closed. Safe.
+
+  The fan controller relay uses ALWAYS_OFF, wired to NC terminals. On power-on
+  the coil is de-energized, NC contacts stay closed, circuit stays connected.
+  That is the intended behaviour and is safe for the relay itself.
+
+  However, there is a subtler risk depending on what is connected to that relay
+  circuit:
+
+  When power is restored after a cut, the ESP32-H2 boots and the relay circuit
+  is immediately closed — before Zigbee has reconnected and before HA has had
+  any chance to assess whether the circuit should be closed at that moment. If
+  HA had issued an open command shortly before the power cut, the device has no
+  memory of that instruction (ALWAYS_OFF deliberately discards it) and will
+  close the circuit regardless.
+
+  Whether this is a problem depends entirely on what the relay is switching:
+
+  ┌───────────────────────────────┬─────────────────────────────────────────┐
+  │        Connected load         │              Power-on risk              │
+  ├───────────────────────────────┼─────────────────────────────────────────┤
+  │ A fan, light, or other        │ Low — connecting it on boot is likely   │
+  │ passive device                │ harmless                                │
+  ├───────────────────────────────┼─────────────────────────────────────────┤
+  │ Something that should only    │ Medium — it activates without HA's      │
+  │ run on explicit command       │ knowledge until HA reconnects and       │
+  │                               │ reassesses                              │
+  ├───────────────────────────────┼─────────────────────────────────────────┤
+  │ A safety-critical circuit     │ High — closing without HA confirmation  │
+  │ (e.g. a lock, an alarm)       │ may be unacceptable                     │
+  └───────────────────────────────┴─────────────────────────────────────────┘
+
+  If your use case falls into the medium or high category, the mitigation is to
+  add a boot delay before the Zigbee connection is established, giving HA a
+  window to issue an open command before the device acts. That would require an
+  on_boot action in the config. Would you like that added?
+
+> for the fan controller configuration, the criticality is high. the circuit
+  should open ONLY upon a command from HA. If the circuit opens in any other
+  situation then this would be unacceptable.
+
+  Thought for 1m 25s (ctrl+o to expand)
+
+● There are two distinct aspects to address here.
+
+  ---
+
+  Software — the current design is already correct
+
+  From a software perspective, the current config already satisfies the
+  requirement. The only ESPHome event that turns the relay ON (which with NC
+  wiring opens the circuit) is an explicit HA command via Zigbee. Every other
+  event keeps or returns the relay to OFF:
+
+  ┌───────────────────────┬──────────────────┬──────────────────┐
+  │         Event         │   Relay state    │     Circuit      │
+  ├───────────────────────┼──────────────────┼──────────────────┤
+  │ Boot / power restore  │ OFF (ALWAYS_OFF) │ Closed ✓         │
+  ├───────────────────────┼──────────────────┼──────────────────┤
+  │ HA command            │ ON               │ Opens (intended) │
+  ├───────────────────────┼──────────────────┼──────────────────┤
+  │ auto_reconnect fires  │ OFF              │ Closes ✓         │
+  ├───────────────────────┼──────────────────┼──────────────────┤
+  │ Power cut mid-session │ OFF on restore   │ Closes ✓         │
+  └───────────────────────┴──────────────────┴──────────────────┘
+
+  No config change is needed here.
+
+  ---
+
+  Hardware — there is a genuine boot-time risk
+
+  Before the firmware initialises, the ESP32-H2's GPIO pins are in an undefined
+  floating state. GPIO2 could briefly float HIGH during the ROM boot phase —
+  before ALWAYS_OFF has taken effect — momentarily energising the relay coil and
+  opening the NC contacts. For a high-criticality application this is
+  unacceptable.
+
+  The fix is a hardware one: add a 10kΩ pull-down resistor between GPIO2 and
+  GND. This holds the pin at LOW at the silicon level throughout the entire boot
+  sequence, regardless of firmware state, making it physically impossible for
+  the coil to energise until the firmware deliberately drives the pin HIGH.
+
+  There is a secondary concern: GPIO2 on the ESP32-H2 is the MTMS JTAG pin. Some
+  devkit boards place a pull-up on JTAG pins for debugging purposes. If your
+  board has a pull-up on GPIO2, that pull-up would work directly against the
+  safety requirement. It is worth checking your specific board's schematic.
+
+  If the schematic confirms a pull-up on GPIO2, the clean resolution is to move
+  the relay to GPIO3, which is a general-purpose IO with no JTAG or strapping
+  function. The only config change required would be:
+
+    - platform: gpio
+      pin: GPIO3        # was GPIO2
+
+  Would you like the config file updated to use GPIO3?
+
+> Can you please amend the config to move to GPIO3 and also include explanatory
+  notes relating to this issue that can be understood without relying on this
+  chat for context
+
+  Thought for 13s, read 1 file (ctrl+o to expand)
+
+● Update(esphome-esp32h2-fancontroller.yaml)
+  ⎿  Added 38 lines, removed 1 line
+       6  #   GPIO5  — DS18B20 sensor 2 (1-Wire; fit 4.7kΩ pull-up to 3.3
+          V externally)
+       7  #   GPIO10 — Fan 1 PWM signal (25 kHz; wire to PWM pin of 4-pin
+           PC fan header)
+       8  #   GPIO11 — Fan 2 PWM signal (25 kHz; wire to PWM pin of 4-pin
+           PC fan header)
+       9 -#   GPIO2  — Relay signal     (wire to NC terminals — circuit c
+         -losed by default)                                              
+       9 +#   GPIO3  — Relay signal     (wire to NC terminals — see relay
+         + safety note below)                                            
+      10  #
+      11  # Connectivity:
+      12  #   ESP32-H2 has no WiFi. HA connects via Zigbee (IEEE 802.15.4
+          ). Requires a
+     ...
+      22  #   5 — Curve Temp Low  (ANALOG_VALUE, writable; °C where fan r
+          amping starts)
+      23  #   6 — Curve Temp High (ANALOG_VALUE, writable; °C where fans 
+          reach 100%)
+      24  #   7 — Fan Min Speed   (ANALOG_VALUE, writable; % minimum fan 
+          speed)
+      25 +#                                                              
+      26 +# ── Relay safety design ──────────────────────────────────────
+         +──────────────────                                             
+      27 +#                                                              
+      28 +# REQUIREMENT: the circuit must open ONLY upon an explicit HA c
+         +ommand. Any                                                    
+      29 +# unintended opening (boot, power cut, firmware reset) is unacc
+         +eptable.                                                       
+      30 +#                                                              
+      31 +# WIRING — use NC (normally closed) terminals on the relay modu
+         +le:                                                            
+      32 +#   Relay coil de-energized (GPIO LOW)  → NC contacts CLOSED → 
+         +circuit CONNECTED                                              
+      33 +#   Relay coil energized    (GPIO HIGH) → NC contacts OPEN   → 
+         +circuit DISCONNECTED                                           
+      34 +#   This means the circuit is closed by default and only opens 
+         +when actively                                                  
+      35 +#   commanded. A power cut de-energizes the coil and the circui
+         +t closes safely.                                               
+      36 +#                                                              
+      37 +# GPIO CHOICE — GPIO3 is used instead of the more obvious GPIO2
+         +:                                                              
+      38 +#   On the ESP32-H2, GPIO2 is the MTMS JTAG debug pin. Many dev
+         +kit boards place                                               
+      39 +#   a pull-up resistor on JTAG pins to support debug tooling. A
+         + pull-up on GPIO2                                              
+      40 +#   would briefly force the pin HIGH during the MCU boot sequen
+         +ce — before the                                                
+      41 +#   firmware has initialised — energizing the relay coil and mo
+         +mentarily opening                                              
+      42 +#   the circuit without any command being issued. GPIO3 has no 
+         +JTAG or strapping                                              
+      43 +#   function and does not carry this risk.                     
+      44 +#                                                              
+      45 +# HARDWARE PULL-DOWN — fit a 10kΩ resistor between GPIO3 and GN
+         +D:                                                             
+      46 +#   During the MCU reset and ROM boot phase, all GPIO pins are 
+         +in an undefined                                                
+      47 +#   floating state before the firmware takes control. Without a
+         + pull-down, GPIO3                                              
+      48 +#   could float HIGH, briefly energizing the coil. The external
+         + pull-down holds                                               
+      49 +#   the pin firmly at LOW throughout the entire boot sequence, 
+         +making it                                                      
+      50 +#   physically impossible for the relay to open before the firm
+         +ware is running.                                               
+      51 +#   Note: the ESP32-H2's internal pull-down is insufficient for
+         + this purpose                                                  
+      52 +#   as it is only active once the firmware configures it — an e
+         +xternal resistor                                               
+      53 +#   is required to cover the period before firmware initialisat
+         +ion.                                                           
+      54 +#                                                              
+      55 +# SOFTWARE — ALWAYS_OFF restore mode:                          
+      56 +#   Once firmware is running, ALWAYS_OFF guarantees the GPIO is
+         + driven LOW on                                                 
+      57 +#   every boot regardless of any previously saved state. Combin
+         +ed with NC wiring                                              
+      58 +#   this means the circuit is always closed at startup. The onl
+         +y ESPHome event                                                
+      59 +#   that drives GPIO3 HIGH (opening the circuit) is an explicit
+         + HA ON command                                                 
+      60 +#   via Zigbee. Boot, power restore, and the auto_reconnect tim
+         +er all drive the                                               
+      61 +#   pin LOW (closing the circuit).                             
+      62  # ─────────────────────────────────────────────────────────────
+          ─────────────────
+      63  
+      64  substitutions:
+
+● Update(esphome-esp32h2-fancontroller.yaml)
+  ⎿  Added 12 lines, removed 6 lines
+      238  # ── Switches ────────────────────────────────────────────────
+           ──────────────────
+      239  
+      240  switch:
+      241 -  # Relay — wired to NC terminals so the circuit is closed whe
+          -never the coil                                                
+      242 -  # is de-energized. ALWAYS_OFF guarantees the GPIO starts LOW
+          - on every boot                                                
+      243 -  # regardless of any previously saved state, ensuring the cir
+          -cuit is never                                                 
+      244 -  # left open after a power cut or reboot. HA issues a single 
+          -ON command to                                                 
+      245 -  # open the circuit; the auto_reconnect script closes it afte
+          -r 30 seconds.                                                 
+      241 +  # Relay — see the relay safety design note in the file heade
+          +r for full context                                            
+      242 +  # on GPIO choice, NC wiring, pull-down resistor, and ALWAYS_
+          +OFF rationale.                                                
+      243 +  #                                                           
+      244 +  # In brief:                                                 
+      245 +  #   - Wired to NC terminals: circuit is closed whenever the 
+          +coil is de-energized                                          
+      246 +  #   - GPIO3 chosen to avoid the JTAG pull-up risk present on
+          + GPIO2 (MTMS)                                                 
+      247 +  #   - Fit a 10kΩ pull-down between GPIO3 and GND to hold the
+          + pin LOW during boot                                          
+      248 +  #   - ALWAYS_OFF ensures GPIO starts LOW on every boot (circ
+          +uit closed)                                                   
+      249 +  #   - The ONLY event that opens the circuit is an HA ON comm
+          +and via Zigbee                                                
+      250 +  #   - on_turn_on arms the auto_reconnect timer (closes after
+          + relay_max_disconnect)                                        
+      251 +  #   - on_turn_off cancels the timer cleanly if HA closes the
+          + circuit early                                                
+      252    - platform: gpio
+      247 -    pin: GPIO2                                                
+      253 +    pin: GPIO3                                                
+      254      id: relay
+      255      name: "Relay"
+      256      icon: "mdi:electric-switch"
+
+● esphome-esp32h2-fancontroller.yaml
+  (C:\Users\I570525\esphome-esp32h2-fancontroller.yaml) updated. Two changes
+  made:
+
+  1. GPIO2 → GPIO3 in both the pinout header and the switch definition
+  2. Explanatory notes added in two places:
+     - A dedicated Relay safety design section in the file header covers the
+       full rationale: the NC wiring requirement, why GPIO2 was avoided
+       (JTAG/MTMS pull-up risk), why an external 10kΩ pull-down resistor is
+       required on GPIO3, why the ESP32's internal pull-down is insufficient,
+       and what ALWAYS_OFF contributes once firmware is running
+     - The switch block has a condensed inline summary cross-referencing the
+       header, so someone reading just that section gets the key points without
+       needing to scroll up
