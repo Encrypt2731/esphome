@@ -1,0 +1,112 @@
+substitutions:
+  fallback_duration: "3min"
+  max_duration: "10min"
+  heartbeat_timeout_h: "25"
+  fallback_interval_h: "12"
+
+esphome:
+  name: irrigation-controller
+  friendly_name: Irrigation Controller
+
+esp32:
+  board: esp32h2devkitm
+  variant: esp32h2
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO
+
+zigbee:
+  endpoints:
+    - num: 1
+      device_type: ON_OFF_OUTPUT
+      cluster_list:
+        - id: ON_OFF
+          attributes:
+            - attr_id: ON_OFF
+              value_ref: irrigation_relay
+
+    - num: 2
+      device_type: ON_OFF_OUTPUT
+      cluster_list:
+        - id: ON_OFF
+          attributes:
+            - attr_id: ON_OFF
+              value_ref: ha_heartbeat
+
+globals:
+  - id: hours_no_heartbeat
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: hours_since_watered
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+script:
+  # Arms whenever the relay turns on — enforces the absolute 10-min ceiling
+  # mode: restart means if HA turns the relay off and on again, the timer resets
+  - id: max_duration_cap
+    mode: restart
+    then:
+      - delay: $max_duration
+      - switch.turn_off: irrigation_relay
+      - logger.log: "Irrigation stopped by 10-min hard cap"
+
+  # Fallback session — 3 min then stops; max_duration_cap still active as backstop
+  # mode: single prevents stacking if the interval fires while already running
+  - id: fallback_irrigation
+    mode: single
+    then:
+      - logger.log: "Fallback irrigation started"
+      - switch.turn_on: irrigation_relay
+      - delay: $fallback_duration
+      - switch.turn_off: irrigation_relay
+      - logger.log: "Fallback irrigation complete"
+
+switch:
+  - platform: gpio
+    pin: GPIO2
+    id: irrigation_relay
+    name: "Irrigation"
+    icon: "mdi:sprinkler"
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - globals.set:
+          id: hours_since_watered
+          value: '0'
+      - script.execute: max_duration_cap
+    on_turn_off:
+      - script.stop: max_duration_cap
+
+  - platform: template
+    name: "HA Heartbeat"
+    id: ha_heartbeat
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - globals.set:
+          id: hours_no_heartbeat
+          value: '0'
+    on_turn_off:
+      - globals.set:
+          id: hours_no_heartbeat
+          value: '0'
+
+interval:
+  - interval: 1h
+    then:
+      - lambda: |-
+          id(hours_no_heartbeat) += 1;
+          id(hours_since_watered) += 1;
+      - if:
+          condition:
+            lambda: |-
+              return id(hours_no_heartbeat) >= $heartbeat_timeout_h
+                  && id(hours_since_watered) >= $fallback_interval_h
+                  && !id(irrigation_relay).state;
+          then:
+            - script.execute: fallback_irrigation

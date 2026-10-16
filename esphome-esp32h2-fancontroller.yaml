@@ -1,0 +1,368 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ESPHome Fan Controller — ESP32-H2 (Zigbee)
+#
+# Pinout:
+#   GPIO4  — DS18B20 sensor 1 (1-Wire; fit 4.7kΩ pull-up to 3.3V externally)
+#   GPIO5  — DS18B20 sensor 2 (1-Wire; fit 4.7kΩ pull-up to 3.3V externally)
+#   GPIO10 — Fan 1 PWM signal (25 kHz; wire to PWM pin of 4-pin PC fan header)
+#   GPIO11 — Fan 2 PWM signal (25 kHz; wire to PWM pin of 4-pin PC fan header)
+#   GPIO2  — Relay signal     (wire to NC terminals — circuit closed by default)
+#
+# Connectivity:
+#   ESP32-H2 has no WiFi. HA connects via Zigbee (IEEE 802.15.4). Requires a
+#   Zigbee coordinator (e.g. Sonoff Dongle Plus) with ZHA or Zigbee2MQTT.
+#   Note: ANALOG_VALUE cluster support requires a recent ESPHome version —
+#   verify against your installed version if build errors occur.
+#
+# Zigbee endpoints:
+#   1 — Temperature 1   (TEMP_MEASUREMENT, read-only)
+#   2 — Temperature 2   (TEMP_MEASUREMENT, read-only)
+#   3 — Relay           (ON_OFF; ON = circuit open, OFF = circuit closed)
+#   4 — HA Heartbeat    (ON_OFF; HA toggles this hourly — see automation below)
+#   5 — Curve Temp Low  (ANALOG_VALUE, writable; °C where fan ramping starts)
+#   6 — Curve Temp High (ANALOG_VALUE, writable; °C where fans reach 100%)
+#   7 — Fan Min Speed   (ANALOG_VALUE, writable; % minimum fan speed)
+# ──────────────────────────────────────────────────────────────────────────────
+
+substitutions:
+  # Fan curve hardcoded defaults — used on first boot and restored when HA has
+  # been unreachable for longer than heartbeat_timeout_h hours
+  default_temp_low: "30.0"     # °C — fan ramping starts here
+  default_temp_high: "60.0"    # °C — fans run at 100% above this
+  default_fan_min_pct: "20.0"  # %  — minimum fan speed (keeps fans spinning)
+
+  # Hours of silence from HA before the device considers it unreachable and
+  # resets the curve parameters to the hardcoded defaults above
+  heartbeat_timeout_h: "25"
+
+  # Maximum time the relay is allowed to stay open (circuit disconnected).
+  # The device closes the circuit automatically after this delay, even if HA
+  # has not issued a close command.
+  relay_max_disconnect: "30s"
+
+esphome:
+  name: fan-controller
+  friendly_name: Fan Controller
+
+esp32:
+  board: esp32h2devkitm
+  variant: esp32h2
+  framework:
+    type: esp-idf   # required for ESP32-H2; Arduino framework is not supported
+
+logger:
+  level: INFO
+
+# ── Zigbee ────────────────────────────────────────────────────────────────────
+
+zigbee:
+  endpoints:
+    - num: 1
+      device_type: TEMPERATURE_SENSOR
+      cluster_list:
+        - id: TEMP_MEASUREMENT
+          attributes:
+            - attr_id: MEASURED_VALUE
+              value_ref: temp_1
+
+    - num: 2
+      device_type: TEMPERATURE_SENSOR
+      cluster_list:
+        - id: TEMP_MEASUREMENT
+          attributes:
+            - attr_id: MEASURED_VALUE
+              value_ref: temp_2
+
+    # ON = relay energized = NC contacts open = circuit disconnected
+    # OFF / default = relay de-energized = NC contacts closed = circuit connected
+    - num: 3
+      device_type: ON_OFF_OUTPUT
+      cluster_list:
+        - id: ON_OFF
+          attributes:
+            - attr_id: ON_OFF
+              value_ref: relay
+
+    # HA must toggle this every hour to prove it is reachable. Either transition
+    # (on→off or off→on) counts as a valid heartbeat ping.
+    - num: 4
+      device_type: ON_OFF_OUTPUT
+      cluster_list:
+        - id: ON_OFF
+          attributes:
+            - attr_id: ON_OFF
+              value_ref: ha_heartbeat
+
+    # Writable curve parameters — HA can adjust these at runtime via Zigbee.
+    # Values persist to flash; reset to substitution defaults on heartbeat timeout.
+    - num: 5
+      device_type: ANALOG_VALUE
+      cluster_list:
+        - id: ANALOG_VALUE
+          attributes:
+            - attr_id: PRESENT_VALUE
+              value_ref: curve_temp_low
+
+    - num: 6
+      device_type: ANALOG_VALUE
+      cluster_list:
+        - id: ANALOG_VALUE
+          attributes:
+            - attr_id: PRESENT_VALUE
+              value_ref: curve_temp_high
+
+    - num: 7
+      device_type: ANALOG_VALUE
+      cluster_list:
+        - id: ANALOG_VALUE
+          attributes:
+            - attr_id: PRESENT_VALUE
+              value_ref: curve_fan_min_pct
+
+# ── Hardware ──────────────────────────────────────────────────────────────────
+
+# Each DS18B20 is on its own 1-Wire bus so sensors are addressed independently.
+# Both require an external 4.7kΩ pull-up resistor to 3.3V — the ESP32-H2's
+# internal pull-up is too weak for reliable 1-Wire communication.
+one_wire:
+  - platform: gpio
+    pin: GPIO4
+    id: ow_bus_1
+  - platform: gpio
+    pin: GPIO5
+    id: ow_bus_2
+
+# LEDC is the ESP32 hardware PWM peripheral. 25 kHz is the standard PWM
+# frequency expected by 4-pin PC fan controllers.
+output:
+  - platform: ledc
+    pin: GPIO10
+    id: fan1_output
+    frequency: 25000Hz
+
+  - platform: ledc
+    pin: GPIO11
+    id: fan2_output
+    frequency: 25000Hz
+
+# ── Scripts ───────────────────────────────────────────────────────────────────
+
+script:
+  # Enforces the maximum relay disconnection time. Armed automatically when
+  # the relay opens; cancelled when it closes. mode: restart means a second
+  # open command within the window resets the timer rather than stacking it.
+  - id: auto_reconnect
+    mode: restart
+    then:
+      - delay: $relay_max_disconnect
+      - switch.turn_off: relay
+      - logger.log: "Relay closed by auto-reconnect timer"
+
+# ── Adjustable curve parameters ───────────────────────────────────────────────
+# These number entities are the live fan curve parameters. HA writes to them
+# via Zigbee endpoints 5-7. restore_value: true persists the last HA-set value
+# to flash so custom settings survive a device reboot. When the heartbeat
+# watchdog fires, these are reset to the substitution defaults (see interval).
+
+number:
+  - platform: template
+    name: "Curve Temp Low"
+    id: curve_temp_low
+    unit_of_measurement: "°C"
+    min_value: 0
+    max_value: 80
+    step: 0.5
+    initial_value: $default_temp_low
+    optimistic: true
+    restore_value: true
+
+  - platform: template
+    name: "Curve Temp High"
+    id: curve_temp_high
+    unit_of_measurement: "°C"
+    min_value: 10
+    max_value: 100
+    step: 0.5
+    initial_value: $default_temp_high
+    optimistic: true
+    restore_value: true
+
+  - platform: template
+    name: "Fan Min Speed"
+    id: curve_fan_min_pct
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 5
+    initial_value: $default_fan_min_pct
+    optimistic: true
+    restore_value: true
+
+# ── Switches ──────────────────────────────────────────────────────────────────
+
+switch:
+  # Relay — wired to NC terminals so the circuit is closed whenever the coil
+  # is de-energized. ALWAYS_OFF guarantees the GPIO starts LOW on every boot
+  # regardless of any previously saved state, ensuring the circuit is never
+  # left open after a power cut or reboot. HA issues a single ON command to
+  # open the circuit; the auto_reconnect script closes it after 30 seconds.
+  - platform: gpio
+    pin: GPIO2
+    id: relay
+    name: "Relay"
+    icon: "mdi:electric-switch"
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - script.execute: auto_reconnect   # arms the disconnection timer
+    on_turn_off:
+      - script.stop: auto_reconnect      # cancels the timer if closed early
+
+  # Heartbeat — HA toggles this every hour. Any state change (on→off or off→on)
+  # resets the hours_no_heartbeat counter. If no toggle is received within
+  # heartbeat_timeout_h hours the device assumes HA is unreachable and resets
+  # the fan curve to hardcoded safe defaults.
+  - platform: template
+    name: "HA Heartbeat"
+    id: ha_heartbeat
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - globals.set:
+          id: hours_no_heartbeat
+          value: '0'
+    on_turn_off:
+      - globals.set:
+          id: hours_no_heartbeat
+          value: '0'
+
+# ── Globals ───────────────────────────────────────────────────────────────────
+
+globals:
+  # Counts hours elapsed since the last heartbeat from HA. Not persisted to
+  # flash — resets to 0 on reboot, giving HA time to reconnect before the
+  # fallback curve activates.
+  - id: hours_no_heartbeat
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+# ── Sensors & fan control ─────────────────────────────────────────────────────
+
+sensor:
+  # Sensor 1 controls Fan 1. On every reading the lambda recalculates fan speed
+  # using the current curve parameters, then sets the LEDC PWM duty cycle.
+  - platform: dallas_temp
+    one_wire_id: ow_bus_1
+    name: "Temperature 1"
+    id: temp_1
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: 10s
+    on_value:
+      then:
+        - lambda: |-
+            float t      = x;
+            float t_low  = id(curve_temp_low).state;
+            float t_high = id(curve_temp_high).state;
+            float f_min  = id(curve_fan_min_pct).state / 100.0f;
+            float spd;
+
+            if (isnan(t)) {
+              // Sensor fault — run at full speed as a safe default
+              spd = 1.00f;
+            } else {
+              // Smoothstep curve: normalise temperature to 0..1, then apply
+              // 3t²-2t³, which has zero slope at both endpoints. This removes
+              // the abrupt speed changes that a linear ramp produces at the
+              // transition points (curve_temp_low and curve_temp_high).
+              float norm = (t - t_low) / (t_high - t_low);
+              norm = fmaxf(0.0f, fminf(1.0f, norm));   // clamp to 0..1
+              float curve = norm * norm * (3.0f - 2.0f * norm);
+              spd = f_min + curve * (1.0f - f_min);
+            }
+
+            id(fan1_output).set_level(spd);
+            id(fan1_speed).publish_state(spd * 100.0f);
+
+  # Sensor 2 controls Fan 2 using the same curve logic.
+  - platform: dallas_temp
+    one_wire_id: ow_bus_2
+    name: "Temperature 2"
+    id: temp_2
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: 10s
+    on_value:
+      then:
+        - lambda: |-
+            float t      = x;
+            float t_low  = id(curve_temp_low).state;
+            float t_high = id(curve_temp_high).state;
+            float f_min  = id(curve_fan_min_pct).state / 100.0f;
+            float spd;
+
+            if (isnan(t)) {
+              spd = 1.00f;
+            } else {
+              float norm = (t - t_low) / (t_high - t_low);
+              norm = fmaxf(0.0f, fminf(1.0f, norm));
+              float curve = norm * norm * (3.0f - 2.0f * norm);
+              spd = f_min + curve * (1.0f - f_min);
+            }
+
+            id(fan2_output).set_level(spd);
+            id(fan2_speed).publish_state(spd * 100.0f);
+
+  # Read-only speed readbacks — exposed to HA for dashboards and automations
+  - platform: template
+    name: "Fan 1 Speed"
+    id: fan1_speed
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    icon: "mdi:fan"
+
+  - platform: template
+    name: "Fan 2 Speed"
+    id: fan2_speed
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    icon: "mdi:fan"
+
+# ── Heartbeat watchdog ────────────────────────────────────────────────────────
+
+interval:
+  - interval: 1h
+    then:
+      - lambda: |-
+          id(hours_no_heartbeat) += 1;
+      - if:
+          condition:
+            lambda: 'return id(hours_no_heartbeat) >= $heartbeat_timeout_h;'
+          then:
+            # HA has been unreachable — reset curve parameters to the safe
+            # hardcoded defaults. Writing via number.set also updates flash so
+            # a reboot while HA is still offline starts with known-good values.
+            - number.set:
+                id: curve_temp_low
+                value: $default_temp_low
+            - number.set:
+                id: curve_temp_high
+                value: $default_temp_high
+            - number.set:
+                id: curve_fan_min_pct
+                value: $default_fan_min_pct
+            - logger.log: "HA unreachable — curve reset to hardcoded defaults"
+
+# ── Required HA automation ────────────────────────────────────────────────────
+# Add the following automation to Home Assistant to keep the heartbeat watchdog
+# fed. Without it, the device will revert to hardcoded defaults after 25 hours.
+#
+# automation:
+#   - alias: "Fan controller heartbeat"
+#     trigger:
+#       - platform: time_pattern
+#         hours: "/1"
+#     action:
+#       - service: switch.toggle
+#         target:
+#           entity_id: switch.fan_controller_ha_heartbeat
