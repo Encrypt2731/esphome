@@ -1,7 +1,39 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ESPHome Irrigation Controller — ESP32-H2 (Zigbee)
+#
+# Pinout:
+#   GPIO2 — Relay signal (wire to NO terminals on relay module; use a relay
+#            module or transistor driver — do not connect mains loads directly
+#            to the GPIO pin)
+#
+# Connectivity:
+#   ESP32-H2 has no WiFi. HA connects via Zigbee (IEEE 802.15.4). Requires a
+#   Zigbee coordinator (e.g. Sonoff Dongle Plus) with ZHA or Zigbee2MQTT.
+#
+# Zigbee endpoints:
+#   1 — Irrigation relay (ON_OFF; HA turns ON to irrigate)
+#   2 — HA Heartbeat     (ON_OFF; HA toggles this hourly — see automation below)
+#
+# Session behaviour:
+#   - HA controls duration and frequency during normal operation
+#   - If HA is unreachable for > 25 hours, a fallback schedule activates:
+#     two sessions per day (every 12 hours), each 3 minutes long
+#   - No single session can exceed 10 minutes regardless of trigger source
+# ──────────────────────────────────────────────────────────────────────────────
+
 substitutions:
+  # Duration of each fallback irrigation session when HA is unreachable
   fallback_duration: "3min"
+
+  # Absolute maximum duration for any single session, whether triggered by HA
+  # or the fallback schedule. Acts as a safety net against stuck-open valves.
   max_duration: "10min"
+
+  # Hours of silence from HA before the fallback schedule activates
   heartbeat_timeout_h: "25"
+
+  # Minimum hours between fallback sessions (24 hours / this value = sessions
+  # per day; 12 = twice per day)
   fallback_interval_h: "12"
 
 esphome:
@@ -12,13 +44,18 @@ esp32:
   board: esp32h2devkitm
   variant: esp32h2
   framework:
-    type: esp-idf
+    type: esp-idf   # required for ESP32-H2; Arduino framework is not supported
 
 logger:
   level: INFO
 
+# ── Zigbee ────────────────────────────────────────────────────────────────────
+
 zigbee:
   endpoints:
+    # HA turns this ON to begin an irrigation session. The device turns it OFF
+    # automatically either after HA's chosen duration or at the 10-min hard cap,
+    # whichever comes first.
     - num: 1
       device_type: ON_OFF_OUTPUT
       cluster_list:
@@ -27,6 +64,8 @@ zigbee:
             - attr_id: ON_OFF
               value_ref: irrigation_relay
 
+    # HA must toggle this every hour to prove it is reachable. Either transition
+    # (on→off or off→on) counts as a valid heartbeat ping.
     - num: 2
       device_type: ON_OFF_OUTPUT
       cluster_list:
@@ -35,20 +74,33 @@ zigbee:
             - attr_id: ON_OFF
               value_ref: ha_heartbeat
 
+# ── Globals ───────────────────────────────────────────────────────────────────
+
 globals:
+  # Counts hours elapsed since the last heartbeat from HA. Reset to 0 on any
+  # heartbeat toggle. Not persisted to flash — resets on reboot, giving HA
+  # time to reconnect before the fallback schedule activates.
   - id: hours_no_heartbeat
     type: int
     restore_value: no
     initial_value: '0'
 
+  # Counts hours elapsed since irrigation last ran (either HA or fallback).
+  # Prevents the fallback from running more frequently than fallback_interval_h.
+  # Not persisted — resets on reboot, which is safe: the fallback will not
+  # trigger for at least heartbeat_timeout_h hours after boot regardless.
   - id: hours_since_watered
     type: int
     restore_value: no
     initial_value: '0'
 
+# ── Scripts ───────────────────────────────────────────────────────────────────
+
 script:
-  # Arms whenever the relay turns on — enforces the absolute 10-min ceiling
-  # mode: restart means if HA turns the relay off and on again, the timer resets
+  # Hard cap — armed automatically whenever the relay turns on, cancelled when
+  # it turns off. Applies to both HA-triggered and fallback sessions.
+  # mode: restart means if the relay is turned off and on again mid-session,
+  # the 10-minute timer resets rather than carrying over from the previous run.
   - id: max_duration_cap
     mode: restart
     then:
@@ -56,8 +108,10 @@ script:
       - switch.turn_off: irrigation_relay
       - logger.log: "Irrigation stopped by 10-min hard cap"
 
-  # Fallback session — 3 min then stops; max_duration_cap still active as backstop
-  # mode: single prevents stacking if the interval fires while already running
+  # Fallback session — runs for fallback_duration then stops. The max_duration_cap
+  # script is still active in parallel as a backstop in case this script hangs.
+  # mode: single prevents sessions stacking if the hourly interval fires while
+  # a session is already in progress.
   - id: fallback_irrigation
     mode: single
     then:
@@ -67,7 +121,14 @@ script:
       - switch.turn_off: irrigation_relay
       - logger.log: "Fallback irrigation complete"
 
+# ── Switches ──────────────────────────────────────────────────────────────────
+
 switch:
+  # Irrigation relay — RESTORE_DEFAULT_OFF ensures the valve starts closed on
+  # every boot so a power cut cannot leave water running. on_turn_on resets the
+  # hours_since_watered counter (so the fallback interval restarts from zero)
+  # and arms the hard cap timer. on_turn_off cancels the timer cleanly whether
+  # the relay was closed by HA, the fallback script, or the hard cap itself.
   - platform: gpio
     pin: GPIO2
     id: irrigation_relay
@@ -82,6 +143,9 @@ switch:
     on_turn_off:
       - script.stop: max_duration_cap
 
+  # Heartbeat — HA toggles this every hour via an automation. Any state change
+  # resets hours_no_heartbeat to 0. If the counter reaches heartbeat_timeout_h
+  # without a toggle, the interval block activates the fallback schedule.
   - platform: template
     name: "HA Heartbeat"
     id: ha_heartbeat
@@ -96,6 +160,8 @@ switch:
           id: hours_no_heartbeat
           value: '0'
 
+# ── Heartbeat watchdog & fallback schedule ────────────────────────────────────
+
 interval:
   - interval: 1h
     then:
@@ -105,8 +171,26 @@ interval:
       - if:
           condition:
             lambda: |-
+              // All three conditions must be true to trigger a fallback session:
+              // 1. HA has been silent for longer than the timeout threshold
+              // 2. Enough time has passed since the last irrigation session
+              // 3. The relay is not already open (prevents double-triggering)
               return id(hours_no_heartbeat) >= $heartbeat_timeout_h
                   && id(hours_since_watered) >= $fallback_interval_h
                   && !id(irrigation_relay).state;
           then:
             - script.execute: fallback_irrigation
+
+# ── Required HA automation ────────────────────────────────────────────────────
+# Add the following automation to Home Assistant to keep the heartbeat watchdog
+# fed. Without it, the fallback schedule will activate after 25 hours.
+#
+# automation:
+#   - alias: "Irrigation controller heartbeat"
+#     trigger:
+#       - platform: time_pattern
+#         hours: "/1"
+#     action:
+#       - service: switch.toggle
+#         target:
+#           entity_id: switch.irrigation_controller_ha_heartbeat
