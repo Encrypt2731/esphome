@@ -6,7 +6,7 @@
 #   GPIO5  — DS18B20 sensor 2 (1-Wire; fit 4.7kΩ pull-up to 3.3V externally)
 #   GPIO10 — Fan 1 PWM signal (25 kHz; wire to PWM pin of 4-pin PC fan header)
 #   GPIO11 — Fan 2 PWM signal (25 kHz; wire to PWM pin of 4-pin PC fan header)
-#   GPIO2  — Relay signal     (wire to NC terminals — circuit closed by default)
+#   GPIO3  — Relay signal     (wire to NC terminals — see relay safety note below)
 #
 # Connectivity:
 #   ESP32-H2 has no WiFi. HA connects via Zigbee (IEEE 802.15.4). Requires a
@@ -22,6 +22,43 @@
 #   5 — Curve Temp Low  (ANALOG_VALUE, writable; °C where fan ramping starts)
 #   6 — Curve Temp High (ANALOG_VALUE, writable; °C where fans reach 100%)
 #   7 — Fan Min Speed   (ANALOG_VALUE, writable; % minimum fan speed)
+#
+# ── Relay safety design ────────────────────────────────────────────────────────
+#
+# REQUIREMENT: the circuit must open ONLY upon an explicit HA command. Any
+# unintended opening (boot, power cut, firmware reset) is unacceptable.
+#
+# WIRING — use NC (normally closed) terminals on the relay module:
+#   Relay coil de-energized (GPIO LOW)  → NC contacts CLOSED → circuit CONNECTED
+#   Relay coil energized    (GPIO HIGH) → NC contacts OPEN   → circuit DISCONNECTED
+#   This means the circuit is closed by default and only opens when actively
+#   commanded. A power cut de-energizes the coil and the circuit closes safely.
+#
+# GPIO CHOICE — GPIO3 is used instead of the more obvious GPIO2:
+#   On the ESP32-H2, GPIO2 is the MTMS JTAG debug pin. Many devkit boards place
+#   a pull-up resistor on JTAG pins to support debug tooling. A pull-up on GPIO2
+#   would briefly force the pin HIGH during the MCU boot sequence — before the
+#   firmware has initialised — energizing the relay coil and momentarily opening
+#   the circuit without any command being issued. GPIO3 has no JTAG or strapping
+#   function and does not carry this risk.
+#
+# HARDWARE PULL-DOWN — fit a 10kΩ resistor between GPIO3 and GND:
+#   During the MCU reset and ROM boot phase, all GPIO pins are in an undefined
+#   floating state before the firmware takes control. Without a pull-down, GPIO3
+#   could float HIGH, briefly energizing the coil. The external pull-down holds
+#   the pin firmly at LOW throughout the entire boot sequence, making it
+#   physically impossible for the relay to open before the firmware is running.
+#   Note: the ESP32-H2's internal pull-down is insufficient for this purpose
+#   as it is only active once the firmware configures it — an external resistor
+#   is required to cover the period before firmware initialisation.
+#
+# SOFTWARE — ALWAYS_OFF restore mode:
+#   Once firmware is running, ALWAYS_OFF guarantees the GPIO is driven LOW on
+#   every boot regardless of any previously saved state. Combined with NC wiring
+#   this means the circuit is always closed at startup. The only ESPHome event
+#   that drives GPIO3 HIGH (opening the circuit) is an explicit HA ON command
+#   via Zigbee. Boot, power restore, and the auto_reconnect timer all drive the
+#   pin LOW (closing the circuit).
 # ──────────────────────────────────────────────────────────────────────────────
 
 substitutions:
@@ -201,13 +238,19 @@ number:
 # ── Switches ──────────────────────────────────────────────────────────────────
 
 switch:
-  # Relay — wired to NC terminals so the circuit is closed whenever the coil
-  # is de-energized. ALWAYS_OFF guarantees the GPIO starts LOW on every boot
-  # regardless of any previously saved state, ensuring the circuit is never
-  # left open after a power cut or reboot. HA issues a single ON command to
-  # open the circuit; the auto_reconnect script closes it after 30 seconds.
+  # Relay — see the relay safety design note in the file header for full context
+  # on GPIO choice, NC wiring, pull-down resistor, and ALWAYS_OFF rationale.
+  #
+  # In brief:
+  #   - Wired to NC terminals: circuit is closed whenever the coil is de-energized
+  #   - GPIO3 chosen to avoid the JTAG pull-up risk present on GPIO2 (MTMS)
+  #   - Fit a 10kΩ pull-down between GPIO3 and GND to hold the pin LOW during boot
+  #   - ALWAYS_OFF ensures GPIO starts LOW on every boot (circuit closed)
+  #   - The ONLY event that opens the circuit is an HA ON command via Zigbee
+  #   - on_turn_on arms the auto_reconnect timer (closes after relay_max_disconnect)
+  #   - on_turn_off cancels the timer cleanly if HA closes the circuit early
   - platform: gpio
-    pin: GPIO2
+    pin: GPIO3
     id: relay
     name: "Relay"
     icon: "mdi:electric-switch"
