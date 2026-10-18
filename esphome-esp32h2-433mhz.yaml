@@ -1,7 +1,45 @@
+# ════════════════════════════════════════════════════════════════════════════════
+#  ESPHome configuration — ESP32-H2 433MHz Door Chime Bridge (Zigbee)
+#
+#  What this does:
+#    1. Listens for the 433MHz RF signal your doorbell button already transmits.
+#    2. Reports a "doorbell pressed" event to Home Assistant over Zigbee.
+#    3. Exposes a button in Home Assistant that, when pressed, transmits the
+#       same 433MHz RF code — causing your chime unit to ring on demand.
+#
+#  Hardware required:
+#    - ESP32-H2 development board (e.g. ESP32-H2-DevKitM-1)
+#    - RXB6 superheterodyne 433MHz receiver module  (DATA → GPIO4)
+#    - FS1000A (XY-FST) 433MHz transmitter module   (DATA → GPIO5)
+#    - 17.3cm wire antenna soldered to each module's ANT pad
+#
+#  Setup phases:
+#    Phase 1 — Code discovery: uncomment "dump: rc_switch", flash the device,
+#              press your doorbell button while watching the serial log, and
+#              note the code and protocol values that repeat consistently.
+#    Phase 2 — Deployment: fill in your captured code in the two marked places
+#              below, re-comment "dump:", and reflash.
+# ════════════════════════════════════════════════════════════════════════════════
+
+
+# ──────────────────────────────────────────
+#  Core device identity
+#
+#  "name" is used internally by ESPHome (e.g. for OTA and log identification).
+#  "friendly_name" is what appears in Home Assistant's device registry.
+# ──────────────────────────────────────────
 esphome:
   name: door-chime-rf
   friendly_name: Door Chime RF Bridge
 
+
+# ──────────────────────────────────────────
+#  Hardware target
+#
+#  Tells ESPHome which chip and board it is compiling for.
+#  The ESP32-H2 is an IEEE 802.15.4 chip (Zigbee/Thread/BLE only — no WiFi).
+#  "esp-idf" is the Espressif native SDK; required for Zigbee support.
+# ──────────────────────────────────────────
 esp32:
   board: esp32-h2-devkitm-1
   variant: esp32h2
@@ -9,41 +47,107 @@ esp32:
     type: esp-idf
     version: recommended
 
-logger:
-  level: DEBUG  # Set to INFO after RF codes are confirmed
 
-# Zigbee end device — pairs with ZHA or Zigbee2MQTT
+# ──────────────────────────────────────────
+#  Serial logging
+#
+#  Outputs diagnostic messages over USB serial (115200 baud).
+#  DEBUG level shows every received RF packet, which is essential during
+#  Phase 1 code discovery.  Switch to INFO once everything is working to
+#  reduce noise.
+# ──────────────────────────────────────────
+logger:
+  level: DEBUG  # Change to INFO after RF codes are confirmed
+
+
+# ──────────────────────────────────────────
+#  Zigbee stack
+#
+#  Configures this device as a Zigbee End Device — the lowest-power role
+#  in a Zigbee network.  It will join an existing Zigbee network run by a
+#  coordinator such as a Zigbee USB stick running ZHA or Zigbee2MQTT.
+#
+#  All ESPHome entities defined below (binary_sensor, button) are
+#  automatically mapped to standard Zigbee clusters so Home Assistant can
+#  see and control them without any extra configuration.
+# ──────────────────────────────────────────
 zigbee:
   type: end_device
 
+
 # ──────────────────────────────────────────
-#  433MHz Receiver (RXB6 DATA → GPIO4)
+#  433MHz Receiver  (RXB6 DATA pin → GPIO4)
+#
+#  This component monitors GPIO4 for RF pulses from the RXB6 module and
+#  decodes them into recognised remote-control protocols (RC Switch, etc.).
+#
+#  tolerance: how much timing variation is accepted before a pulse is
+#    rejected.  60% is generous — useful for cheap transmitters.
+#
+#  filter: ignores any pulse shorter than 250 microseconds.  This rejects
+#    electrical noise that would otherwise cause false triggers.
+#
+#  idle: if no pulse is received for 4 ms, the current packet is considered
+#    complete and handed off for decoding.
+#
+#  PHASE 1 — Code discovery:
+#    Uncomment "dump: rc_switch" below, then flash and open the serial log.
+#    Press your doorbell button several times.  Each press will print a line
+#    like:
+#      Received RCSwitch Raw: protocol=1 data="010110100101101001011010" (24 bits)
+#    The value that repeats consistently is your doorbell code.
+#    Re-comment "dump:" before your Phase 2 flash.
 # ──────────────────────────────────────────
 remote_receiver:
   id: rf_rx
   pin:
     number: GPIO4
     mode:
-      input: true
-  # PHASE 1 — Code discovery:
-  #   Uncomment dump below, flash, open serial at 115200 baud, press your
-  #   doorbell button 3-5 times, and note the repeated "data" and "protocol"
-  #   values in the log output.  Then fill them in below and re-comment this.
-  # dump: rc_switch
+      input: true   # GPIO4 reads the signal from the RXB6 module
+  # dump: rc_switch   # ← Uncomment for Phase 1 code discovery only
   tolerance: 60%
   filter: 250us
   idle: 4ms
 
+
 # ──────────────────────────────────────────
-#  433MHz Transmitter (FS1000A DATA → GPIO5)
+#  433MHz Transmitter  (FS1000A DATA pin ← GPIO5)
+#
+#  This component drives GPIO5 to send RF pulses through the FS1000A module.
+#
+#  carrier_duty_percent: 100% means the GPIO is driven directly with the
+#    data signal.  IR (infrared) transmitters need a 38kHz carrier wave
+#    baked in; 433MHz RF modules do not — they generate the carrier
+#    internally, so we pass the raw data at full duty cycle.
 # ──────────────────────────────────────────
 remote_transmitter:
   id: rf_tx
   pin: GPIO5
-  carrier_duty_percent: 100%  # RF (not IR) — no carrier modulation
+  carrier_duty_percent: 100%  # RF modules modulate internally — no carrier needed here
+
 
 # ──────────────────────────────────────────
-#  Doorbell binary sensor (Zigbee IAS Zone)
+#  Doorbell binary sensor  (Zigbee IAS Zone cluster)
+#
+#  Watches the remote_receiver for the specific RF code your doorbell button
+#  transmits.  When a match is found, this sensor switches to "on" in Home
+#  Assistant, which you can use to trigger automations (notifications, lights,
+#  camera recordings, etc.).
+#
+#  device_class: "occupancy" maps this to the Zigbee IAS Zone cluster, which
+#    Home Assistant displays as a motion/presence sensor — a reasonable fit
+#    for a doorbell.  You could also use "door" or "sound".
+#
+#  rc_switch_raw:
+#    code     — the binary string captured during Phase 1
+#    protocol — the RC Switch timing protocol number (commonly 1–6)
+#
+#  delayed_off: keeps the sensor "on" for 3 seconds after the last matching
+#    pulse, then returns it to "off".  This debounces the signal (a single
+#    button press typically fires 3–10 identical RF packets in quick
+#    succession) and gives automations a clean, stable trigger edge.
+#
+#  PHASE 2 — Replace "REPLACE_WITH_CAPTURED_CODE" with your actual code.
 # ──────────────────────────────────────────
 binary_sensor:
   - platform: remote_receiver
@@ -51,26 +155,36 @@ binary_sensor:
     name: "Doorbell"
     device_class: occupancy
     rc_switch_raw:
-      # PHASE 2 — Replace with the code captured during Phase 1.
-      # Example: code "010110100101101001011010" protocol 1
-      code: "REPLACE_WITH_CAPTURED_CODE"
-      protocol: 1
+      code: "REPLACE_WITH_CAPTURED_CODE"  # e.g. "010110100101101001011010"
+      protocol: 1                          # e.g. 1  (match what the log showed)
     filters:
-      - delayed_off: 3s  # Debounce: suppress repeated triggers for 3 s
+      - delayed_off: 3s
+
 
 # ──────────────────────────────────────────
-#  Chime trigger button (Zigbee On/Off cluster)
+#  Ring Chime button  (Zigbee On/Off cluster)
+#
+#  Exposes a pressable button in Home Assistant.  When pressed — either
+#  manually in the HA UI or by an automation — it instructs the ESP32-H2
+#  to transmit the doorbell code over 433MHz, causing the chime unit to
+#  ring exactly as if someone had pressed the physical doorbell button.
+#
+#  The code is transmitted 3 times in quick succession with a 10ms gap
+#  between each burst.  Most 433MHz chime receivers expect a few repeats
+#  before they act; a single burst can be missed if the receiver is busy.
+#
+#  PHASE 2 — Replace "REPLACE_WITH_CAPTURED_CODE" with the same code and
+#    protocol you put in the binary_sensor section above.
 # ──────────────────────────────────────────
 button:
   - platform: template
     name: "Ring Chime"
     on_press:
       - repeat:
-          count: 3  # Transmit 3 times for reliability
+          count: 3       # Transmit the code 3 times for reliable delivery
           sequence:
             - remote_transmitter.transmit_rc_switch_raw:
                 transmitter_id: rf_tx
-                # PHASE 2 — Same code and protocol as the binary_sensor above.
-                code: "REPLACE_WITH_CAPTURED_CODE"
-                protocol: 1
-            - delay: 10ms
+                code: "REPLACE_WITH_CAPTURED_CODE"  # Same code as binary_sensor
+                protocol: 1                          # Same protocol as binary_sensor
+            - delay: 10ms  # Brief gap between each repeated burst
