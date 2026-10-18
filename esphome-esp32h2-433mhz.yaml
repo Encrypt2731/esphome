@@ -1,0 +1,76 @@
+esphome:
+  name: door-chime-rf
+  friendly_name: Door Chime RF Bridge
+
+esp32:
+  board: esp32-h2-devkitm-1
+  variant: esp32h2
+  framework:
+    type: esp-idf
+    version: recommended
+
+logger:
+  level: DEBUG  # Set to INFO after RF codes are confirmed
+
+# Zigbee end device — pairs with ZHA or Zigbee2MQTT
+zigbee:
+  type: end_device
+
+# ──────────────────────────────────────────
+#  433MHz Receiver (RXB6 DATA → GPIO4)
+# ──────────────────────────────────────────
+remote_receiver:
+  id: rf_rx
+  pin:
+    number: GPIO4
+    mode:
+      input: true
+  # PHASE 1 — Code discovery:
+  #   Uncomment dump below, flash, open serial at 115200 baud, press your
+  #   doorbell button 3-5 times, and note the repeated "data" and "protocol"
+  #   values in the log output.  Then fill them in below and re-comment this.
+  # dump: rc_switch
+  tolerance: 60%
+  filter: 250us
+  idle: 4ms
+
+# ──────────────────────────────────────────
+#  433MHz Transmitter (FS1000A DATA → GPIO5)
+# ──────────────────────────────────────────
+remote_transmitter:
+  id: rf_tx
+  pin: GPIO5
+  carrier_duty_percent: 100%  # RF (not IR) — no carrier modulation
+
+# ──────────────────────────────────────────
+#  Doorbell binary sensor (Zigbee IAS Zone)
+# ──────────────────────────────────────────
+binary_sensor:
+  - platform: remote_receiver
+    id: doorbell_button
+    name: "Doorbell"
+    device_class: occupancy
+    rc_switch_raw:
+      # PHASE 2 — Replace with the code captured during Phase 1.
+      # Example: code "010110100101101001011010" protocol 1
+      code: "REPLACE_WITH_CAPTURED_CODE"
+      protocol: 1
+    filters:
+      - delayed_off: 3s  # Debounce: suppress repeated triggers for 3 s
+
+# ──────────────────────────────────────────
+#  Chime trigger button (Zigbee On/Off cluster)
+# ──────────────────────────────────────────
+button:
+  - platform: template
+    name: "Ring Chime"
+    on_press:
+      - repeat:
+          count: 3  # Transmit 3 times for reliability
+          sequence:
+            - remote_transmitter.transmit_rc_switch_raw:
+                transmitter_id: rf_tx
+                # PHASE 2 — Same code and protocol as the binary_sensor above.
+                code: "REPLACE_WITH_CAPTURED_CODE"
+                protocol: 1
+            - delay: 10ms
