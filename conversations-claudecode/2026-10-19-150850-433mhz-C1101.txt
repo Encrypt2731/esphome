@@ -1,0 +1,1076 @@
+
+> <ide_opened_file>The user opened the file
+  c:\Users\I570525\2026-10-19-113613-sonoff_RF_bridge_r2.txt in the IDE. This
+  may or may not be related to the current task.</ide_opened_file>
+
+> Can you please generate an ESPhome configuration for an ESP32-H2 (on zigbee)
+  to be able to send and receive 433mhz signals for my door chime? For the
+  radio communication, I would like to use readily available pre-manufactured
+  modules using CC1101. Can you please provide the recommended pinout and
+  wiring for these components and advise of any other components that might be
+  needed?
+
+  Thought for 49s (ctrl+o to expand)
+
+● Looking at the opened file and your request, let me address a few important
+  technical constraints before diving in.
+
+  Important: ESP32-H2 Limitations
+
+  The ESP32-H2 has no WiFi — it only has IEEE 802.15.4 (Zigbee/Thread) and BLE.
+  Standard ESPHome uses WiFi for OTA and API, so you must use ESPHome's Zigbee
+  mode, which reports data to Home Assistant via a Zigbee coordinator (e.g.,
+  Sonoff Zigbee 3.0 USB Dongle Plus). This is supported but still maturing.
+
+  If you want a simpler path, consider an ESP32-C3 or ESP32 classic with WiFi
+  instead — same SPI for CC1101, much more ESPHome community support.
+
+  ---
+
+  Wiring: CC1101 Module → ESP32-H2
+
+  CC1101 pre-made modules (the common 8-pin green PCB) run at 3.3V — directly
+  compatible with the ESP32-H2's GPIO logic.
+
+  ┌────────────────┬───────────────┬─────────────────────────────────────┐
+  │   CC1101 Pin   │ ESP32-H2 GPIO │                Notes                │
+  ├────────────────┼───────────────┼─────────────────────────────────────┤
+  │ VCC            │ 3.3V          │ Do not use 5V                       │
+  ├────────────────┼───────────────┼─────────────────────────────────────┤
+  │ GND            │ GND           │                                     │
+  ├────────────────┼───────────────┼─────────────────────────────────────┤
+  │ SCK            │ GPIO4         │ SPI clock                           │
+  ├────────────────┼───────────────┼─────────────────────────────────────┤
+  │ MOSI (SI)      │ GPIO5         │ SPI data in                         │
+  ├────────────────┼───────────────┼─────────────────────────────────────┤
+  │ MISO (SO/GDO1) │ GPIO6         │ SPI data out                        │
+  ├────────────────┼───────────────┼─────────────────────────────────────┤
+  │ CSN (CS)       │ GPIO2         │ Chip select                         │
+  ├────────────────┼───────────────┼─────────────────────────────────────┤
+  │ GDO0           │ GPIO7         │ RF data / interrupt — key pin       │
+  ├────────────────┼───────────────┼─────────────────────────────────────┤
+  │ GDO2           │ GPIO10        │ Optional (carrier detect / TX gate) │
+  └────────────────┴───────────────┴─────────────────────────────────────┘
+
+  Avoid GPIO8 (boot button on most dev boards) and GPIO9 (JTAG).
+
+  ---
+
+  Additional Components You'll Need
+
+  ┌──────────────────────────────┬─────┬────────────────────────────────────┐
+  │          Component           │ Qty │              Purpose               │
+  ├──────────────────────────────┼─────┼────────────────────────────────────┤
+  │ CC1101 433MHz module         │ 1   │ Already includes crystal + antenna │
+  ├──────────────────────────────┼─────┼────────────────────────────────────┤
+  │ 100nF ceramic capacitor      │ 1   │ Decoupling on CC1101 VCC pin       │
+  ├──────────────────────────────┼─────┼────────────────────────────────────┤
+  │ 10µF electrolytic capacitor  │ 1   │ Bulk decoupling on 3.3V rail       │
+  ├──────────────────────────────┼─────┼────────────────────────────────────┤
+  │ Jumper wires / 2.54mm header │ —   │ Module to dev board                │
+  └──────────────────────────────┴─────┴────────────────────────────────────┘
+
+  The pre-made modules already include the crystal oscillator, PCB trace antenna
+  or spring antenna, and bypass caps on-board — you just need the extra
+  rail-level decoupling near the module's VCC pin.
+
+  ---
+
+  ESPHome Configuration
+
+  esphome:
+    name: doorbell-rf-bridge
+    friendly_name: Doorbell RF Bridge
+
+  esp32:
+    board: esp32h2-devkitm-1
+    variant: ESP32H2
+    framework:
+      type: esp-idf
+      version: recommended
+
+  logger:
+    level: DEBUG
+
+  # --- CC1101 via SPI ---
+  spi:
+    clk_pin: GPIO4
+    mosi_pin: GPIO5
+    miso_pin: GPIO6
+
+  # Community CC1101 external component — search ESPHome community/GitHub
+  # for "esphome cc1101 external_components" to find a maintained source.
+  # A commonly referenced one is dbuezas/esphome-cc1101; verify it is
+  # current and supports your ESPHome version before using.
+  external_components:
+    - source:
+        type: git
+        url: https://github.com/dbuezas/esphome-cc1101
+        ref: main
+      components: [cc1101]
+
+  cc1101:
+    id: cc1101_rf
+    cs_pin: GPIO2
+    gdo0_pin: GPIO7
+    bandwidth: 200   # kHz — widen for noisy environments
+    frequency: 433920 # kHz = 433.92 MHz
+
+  # --- RF receive on GDO0 ---
+  remote_receiver:
+    pin: GPIO7
+    dump: all          # logs raw codes to serial during discovery
+    tolerance: 50%
+    filter: 4us
+    idle: 4ms
+
+  # --- RF transmit (optional, e.g. to replay a signal) ---
+  remote_transmitter:
+    pin: GPIO7
+    carrier_duty_percent: 100%  # OOK/ASK — no carrier frequency needed
+
+  # --- Zigbee (requires a Zigbee coordinator in Home Assistant) ---
+  # ESPHome Zigbee for ESP32-H2 is under active development.
+  # Check the ESPHome docs for the current zigbee: component syntax
+  # as the API may have changed since this config was written.
+  zigbee:
+    id: zb
+
+  binary_sensor:
+    - platform: template
+      id: doorbell_button
+      name: "Doorbell"
+      # Set this to true when a matching RF code is received.
+      # Replace 0x1234AB with the actual code captured from your chime's
+      # transmitter (visible in ESPHome logs with dump: all above).
+      filters:
+        - delayed_off: 2s  # debounce — stays on for 2s after trigger
+      on_press:
+        - logger.log: "Doorbell pressed!"
+
+  ---
+
+  Discovery Workflow
+
+  1. Flash the config and open the ESPHome serial log.
+  2. Press your doorbell button — with dump: all, the receiver will print the
+     raw protocol and code (e.g., RC switch: protocol 1, data 0x1234AB).
+  3. Use that captured code to write a specific remote_receiver binary sensor
+     trigger instead of template.
+  4. Remove dump: all once you have the code.
+
+  ---
+
+  Caveats
+
+  - Zigbee + CC1101 concurrently on ESP32-H2 is unusual. The Zigbee radio uses
+    the 802.15.4 stack internally and the CC1101 uses SPI — different
+    peripherals, so they should not conflict, but this combination has limited
+    community examples. Test RF receive performance in the presence of Zigbee
+    transmissions.
+  - ESPHome's zigbee: component syntax is still evolving — cross-check against
+    the current ESPHome docs before building.
+  - Some 433MHz chime protocols (e.g., Byron SX) decode cleanly with ESPHome's
+    built-in remote_receiver dumpers; others may need raw timing analysis.
+
+> Can you please expand the yaml with detailed explanatory comments?
+
+  Thought for 2s (ctrl+o to expand)
+
+● #
+  =============================================================================
+  # ESPHome Configuration: 433MHz RF Bridge via CC1101 on ESP32-H2 (Zigbee)
+  #
+  =============================================================================
+  # Hardware: ESP32-H2-DevKitM-1 + CC1101 433MHz transceiver module
+  #
+  # Communication path:
+  #   Door chime button (433MHz) → CC1101 module → ESP32-H2 → Zigbee →
+  #   Zigbee coordinator (e.g. Sonoff Zigbee USB dongle) → Home Assistant
+  #
+  # IMPORTANT: The ESP32-H2 has NO WiFi. It communicates exclusively via
+  # IEEE 802.15.4 (Zigbee/Thread) and BLE. This means:
+  #   - You cannot use the standard ESPHome WiFi API or OTA
+  #   - You MUST have a Zigbee coordinator paired with Home Assistant
+  #   - Flashing is done via USB serial only (no wireless OTA)
+  #
+  =============================================================================
+
+  esphome:
+    name: doorbell-rf-bridge
+    # Friendly name shown in Home Assistant's device registry
+    friendly_name: Doorbell RF Bridge
+
+  #
+  -----------------------------------------------------------------------------
+  # ESP32-H2 Platform Configuration
+  #
+  -----------------------------------------------------------------------------
+  esp32:
+    board: esp32h2-devkitm-1
+    variant: ESP32H2  # Explicitly declare the H2 variant (distinct from S2, S3,
+  C3)
+
+    framework:
+      type: esp-idf   # esp-idf is REQUIRED for ESP32-H2; the Arduino framework
+                      # does not support the H2 variant. Also required for
+  Zigbee.
+      version: recommended  # Lets ESPHome pick the version it was tested
+  against.
+                            # Pin to a specific version (e.g. "5.2.1") if you
+  need
+                            # reproducible builds.
+
+  #
+  -----------------------------------------------------------------------------
+  # Logger
+  #
+  -----------------------------------------------------------------------------
+  logger:
+    level: DEBUG  # Use DEBUG during initial setup to see raw RF codes in the
+                  # serial output. Switch to INFO or WARN in production to
+  reduce
+                  # log noise and save flash write cycles.
+    # Logs are only accessible via USB serial on the ESP32-H2 (no WiFi logging).
+
+  #
+  -----------------------------------------------------------------------------
+  # SPI Bus — used by the CC1101 transceiver module
+  #
+  -----------------------------------------------------------------------------
+  # The CC1101 is a full-duplex SPI device (Mode 0, MSB first, up to ~6.5 MHz).
+  # ESP32-H2 has a flexible GPIO matrix — any GPIO can be assigned to SPI,
+  # but the pins below align with the hardware FSPI peripheral for best
+  performance.
+  #
+  # Physical wiring:
+  #   CC1101 SCK  → GPIO4   (SPI clock — idles low, clocks on rising edge)
+  #   CC1101 MOSI → GPIO5   (Master Out Slave In — data ESP32→CC1101)
+  #   CC1101 MISO → GPIO6   (Master In Slave Out  — data CC1101→ESP32)
+  #   CC1101 CSN  → GPIO2   (Chip Select, active LOW — defined under cc1101:)
+  #   CC1101 GDO0 → GPIO7   (General-purpose digital output 0 — carries RF data)
+  #   CC1101 GDO2 → GPIO10  (Optional: carrier detect or TX gate — not used
+  here)
+  #   CC1101 VCC  → 3.3V    (The module must NOT be connected to 5V)
+  #   CC1101 GND  → GND
+  #
+  # Note: the MISO line (GDO1 on the CC1101 chip) doubles as SPI MISO;
+  # it is only driven when CSN is asserted, so it does not interfere with
+  # GDO0 or GDO2 during normal operation.
+  spi:
+    clk_pin: GPIO4
+    mosi_pin: GPIO5
+    miso_pin: GPIO6
+
+  #
+  -----------------------------------------------------------------------------
+  # CC1101 External Component
+  #
+  -----------------------------------------------------------------------------
+  # ESPHome does not include a CC1101 driver in its core component library.
+  # An external component sourced from the community is required.
+  #
+  # The example below references a commonly cited community implementation.
+  # BEFORE using it you should:
+  #   1. Verify the repository is still actively maintained.
+  #   2. Check the repo's README for any ESPHome version requirements.
+  #   3. Review the source code briefly — external components run on your
+  device.
+  #
+  # Alternatives: search the ESPHome community forum and GitHub for
+  # "esphome cc1101 external_components" to find other maintained options.
+  external_components:
+    - source:
+        type: git
+        url: https://github.com/dbuezas/esphome-cc1101
+        ref: main  # Pin to a specific commit hash for production stability,
+                   # e.g. ref: "abc1234", so an upstream update cannot break
+                   # your device silently during the next compile.
+      components: [cc1101]  # Only pull in the cc1101 component, not everything.
+
+  #
+  -----------------------------------------------------------------------------
+  # CC1101 Radio Configuration
+  #
+  -----------------------------------------------------------------------------
+  cc1101:
+    id: cc1101_rf       # Internal ESPHome ID — used to reference this radio
+                        # instance elsewhere in the config if needed.
+
+    cs_pin: GPIO2       # Chip Select: pulled LOW by ESPHome to begin each SPI
+                        # transaction. Must not be shared with any other SPI
+  device.
+
+    gdo0_pin: GPIO7     # GDO0 is the CC1101's configurable digital output.
+                        # In receive mode it transitions high when the RF data
+                        # pin carries a demodulated signal, giving the
+                        # remote_receiver component its input edge stream.
+                        # In transmit mode the CC1101 is configured to mirror
+                        # the serial TX data back on this pin.
+
+    bandwidth: 200      # Receiver channel filter bandwidth in kHz.
+                        # 200 kHz is a good general-purpose value for 433 MHz
+                        # OOK/ASK devices. Narrow it (e.g. 100) for better
+                        # noise rejection once your protocol is confirmed.
+                        # Widen it (e.g. 325) if you see missed packets.
+
+    frequency: 433920   # Centre frequency in kHz = 433.920 MHz.
+                        # This is the ISM band frequency used by the vast
+  majority
+                        # of European/UK/AU 433 MHz devices including most door
+                        # chimes. North American devices often use 315 MHz —
+                        # change this value and re-pair if signals are not
+  detected.
+
+  #
+  -----------------------------------------------------------------------------
+  # RF Receiver — decodes incoming 433 MHz signals from the chime transmitter
+  #
+  -----------------------------------------------------------------------------
+  # The remote_receiver component watches the GDO0 pin for pulse-width-modulated
+  # digital transitions that represent the demodulated RF baseband signal.
+  # It can decode many common protocols automatically (RC switch, LaCrosse,
+  # etc.) and will also dump unknown signals as raw microsecond timings.
+  remote_receiver:
+    pin:
+      number: GPIO7
+      # GDO0 idles LOW when no signal is present; the CC1101 drives it HIGH
+      # during reception. No pull-up or pull-down resistor is needed on this
+      # pin — the CC1101 actively drives it both ways.
+      inverted: false
+
+    dump: all   # DISCOVERY MODE: log every received signal to serial output,
+                # including its decoded protocol name and code value, or raw
+                # pulse timings if the protocol is unrecognised.
+                # How to use: press your doorbell button and watch the serial
+                # log. Note the protocol (e.g. "RC switch protocol 1") and the
+                # hex/decimal code. Once captured, you can replace dump: all
+                # with dump: [] to silence the log spam, and use the captured
+                # code in a binary_sensor trigger below.
+
+    tolerance: 50%  # How much timing variation is accepted when matching pulses
+                    # to a known protocol. Battery-powered RF remotes and cheap
+                    # oscillators can drift significantly — 50% is permissive
+                    # enough to catch most real-world devices without causing
+                    # false positives on a 433 MHz band that is fairly busy.
+
+    filter: 4us     # Ignore any pulses shorter than 4 microseconds.
+                    # Eliminates glitch spikes from electrical noise before they
+                    # reach the protocol decoder. Raise to 8–10 us if you get
+                    # phantom triggers with nothing pressed.
+
+    idle: 4ms       # Declare a transmission complete after 4 ms of silence.
+                    # Most 433 MHz OOK protocols send a sync gap of 5–10 ms
+                    # between repeated frames; 4 ms balances responsiveness
+                    # against splitting a multi-frame burst into false events.
+
+  #
+  -----------------------------------------------------------------------------
+  # RF Transmitter — replays 433 MHz signals (optional, e.g. to trigger a
+  # remote chime sounder from Home Assistant)
+  #
+  -----------------------------------------------------------------------------
+  # The same GDO0 pin is used for both RX and TX. The CC1101 component
+  # automatically switches the radio between receive and transmit modes.
+  # Do not connect two separate pins for TX and RX — the CC1101 is a
+  # half-duplex transceiver and routes both through GDO0 in this configuration.
+  remote_transmitter:
+    pin: GPIO7
+
+    carrier_duty_percent: 100%  # OOK/ASK modulation carries no sub-carrier —
+                                 # the RF signal is simply keyed on/off by the
+                                 # baseband data. Use 100% duty (no carrier) for
+                                 # OOK. If you ever need FSK or a device that
+                                 # requires a 38 kHz carrier, adjust this and
+                                 # add a carrier_frequency entry.
+
+  #
+  -----------------------------------------------------------------------------
+  # Zigbee Configuration
+  #
+  -----------------------------------------------------------------------------
+  # The ESP32-H2 communicates with Home Assistant exclusively via Zigbee.
+  # Pairing process:
+  #   1. Flash this firmware via USB.
+  #   2. In Home Assistant → Zigbee2MQTT (or ZHA), open "permit join".
+  #   3. Power-cycle the ESP32-H2 — it will announce itself and pair.
+  #   4. The device will appear as a custom Zigbee end device.
+  #
+  # NOTE: ESPHome's zigbee: component is under active development as of 2025.
+  # The syntax below represents the general structure — cross-check against
+  # the current ESPHome Zigbee documentation for your installed version,
+  # as field names and cluster IDs may differ.
+  zigbee:
+    id: zb
+    # The ESP32-H2 will operate as a Zigbee End Device (ZED), not a router.
+    # ZED devices can sleep between events, conserving power. If you add
+    # deep_sleep: to the config, coordinate the Zigbee poll interval so the
+    # coordinator does not mark the device as offline between wake cycles.
+
+  #
+  -----------------------------------------------------------------------------
+  # Binary Sensor — door chime / doorbell button
+  #
+  -----------------------------------------------------------------------------
+  binary_sensor:
+    - platform: template
+      id: doorbell_button
+      name: "Doorbell"
+      # This sensor reports to Home Assistant via Zigbee.
+      # It becomes "on" when the lambda below returns true, and reverts to
+      # "off" after the delayed_off filter expires (2 seconds below).
+
+      #
+  -------------------------------------------------------------------------
+      # HOW TO POPULATE THE TRIGGER CODE
+      #
+  -------------------------------------------------------------------------
+      # Step 1: Flash this config with dump: all in remote_receiver (already
+  set).
+      # Step 2: Open the ESPHome serial log (115200 baud via USB).
+      # Step 3: Press your doorbell button several times.
+      # Step 4: Look for lines like:
+      #           [D][remote.rc_switch] Received RC Switch: protocol=1,
+  data=0x1234AB
+      #         or for raw timing:
+      #           [D][remote.raw] Received Raw: 450, -1350, 450, -450, ...
+      # Step 5: Note the protocol number and hex code.
+      # Step 6: Replace the on_press action below with a dedicated
+      #         remote_receiver binary_sensor using that code.
+      #
+      # Example for an RC Switch protocol 1 doorbell with code 0x1234AB:
+      #
+      #   binary_sensor:
+      #     - platform: remote_receiver
+      #       name: "Doorbell"
+      #       rc_switch_raw:
+      #         code: "0x1234AB"
+      #         protocol: 1
+      #       filters:
+      #         - delayed_off: 2s
+      #
+      # Using remote_receiver directly (rather than template) is preferred
+      # because ESPHome handles the timing and protocol match natively.
+      #
+  -------------------------------------------------------------------------
+
+      filters:
+        - delayed_off: 2s   # After the sensor triggers, hold it in the "on"
+                            # state for 2 seconds before returning to "off".
+                            # This prevents rapid re-triggering if the chime
+                            # transmitter sends its code multiple times per
+  press
+                            # (most do — typically 3–8 repeats per button
+  press).
+
+      on_press:
+        - logger.log:
+            level: INFO
+            format: "Doorbell pressed — signalling via Zigbee"
+
+  The most important next step is the discovery pass: flash this, open the
+  serial monitor at 115,200 baud, press your chime button, and find your
+  protocol and code in the log. Once you have that, swap the template binary
+  sensor for a remote_receiver one using the captured values and remove dump:
+  all.
+
+> can you provide more specific detail on the wiring for the capacitors?
+
+  Thought for 11s (ctrl+o to expand)
+
+● Decoupling Capacitor Wiring — Detailed
+
+  What they do and why placement matters
+
+  Decoupling capacitors suppress voltage rail noise. The CC1101 draws sudden
+  bursts of current during SPI transactions and RF switching, which causes brief
+  voltage dips on the 3.3V rail. Without local capacitance to supply that
+  charge instantly, the dip can corrupt SPI reads or cause erratic RF behaviour.
+
+  Shorter leads = better. A capacitor 10 cm away connected by long wire has too
+  much inductance to respond fast enough — it effectively stops working at high
+  frequencies.
+
+  ---
+
+  The two capacitors and where they connect
+
+  3.3V pin (ESP32-H2)                CC1101 module
+           │                              │
+           │     ┌────────────────────────┤ VCC
+           │     │           C1 (100nF)   │
+           │     ├──┤├────┤├──┤├──┤├──────┤ GND
+           │     │  (between VCC and GND, │
+           │     │   as close to the      │
+           │     │   module pins as       │
+           │     │   physically possible) │
+           │     │                        │
+    C2 ────┤     │
+  (10µF)   │     │
+    +  ────┤─────┘
+    -  ────┤
+           │
+          GND (ESP32-H2)
+
+  ---
+
+  Capacitor 1 — 100nF ceramic (high-frequency bypass)
+
+  ┌────────────┬────────────────────────────────────────────────────────────┐
+  │   Detail   │                           Value                            │
+  ├────────────┼────────────────────────────────────────────────────────────┤
+  │ Value      │ 100nF (0.1µF)                                              │
+  ├────────────┼────────────────────────────────────────────────────────────┤
+  │ Type       │ Ceramic (non-polarised — no positive/negative leg)         │
+  ├────────────┼────────────────────────────────────────────────────────────┤
+  │ Voltage    │ 10V minimum (16V or 25V rated parts are fine and common)   │
+  │ rating     │                                                            │
+  ├────────────┼────────────────────────────────────────────────────────────┤
+  │ Connect    │ CC1101 module VCC pin and CC1101 module GND pin            │
+  │ between    │                                                            │
+  ├────────────┼────────────────────────────────────────────────────────────┤
+  │            │ As physically close to the VCC pin as possible — ideally   │
+  │ Placement  │ the capacitor legs bridge directly into the same row as    │
+  │            │ the module's VCC and GND pins on a breadboard              │
+  └────────────┴────────────────────────────────────────────────────────────┘
+
+  On a breadboard: insert the module, then insert this capacitor in the two rows
+  directly adjacent to the module's VCC and GND pins — not at the far end of
+  the power rail strip.
+
+  Polarity: none — either leg can go to VCC or GND.
+
+  ---
+
+  Capacitor 2 — 10µF electrolytic (bulk charge reservoir)
+
+  ┌──────────────┬──────────────────────────────────────────────────────────┐
+  │    Detail    │                          Value                           │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ Value        │ 10µF                                                     │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ Type         │ Electrolytic — polarised, polarity must be correct       │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ Voltage      │ 10V minimum                                              │
+  │ rating       │                                                          │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ Connect      │ ESP32-H2 3.3V output pin and GND                         │
+  │ between      │                                                          │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ Placement    │ Close to where the 3.3V wire leaves the ESP32-H2 board   │
+  │              │ toward the CC1101 module                                 │
+  └──────────────┴──────────────────────────────────────────────────────────┘
+
+  Polarity — critical: Electrolytic capacitors will fail or burst if wired
+  backwards.
+
+  - The longer leg is positive (+) → connect to 3.3V
+  - The shorter leg is negative (−) → connect to GND
+  - The negative leg is also marked with a white stripe printed on the can body
+
+  ---
+
+  Breadboard layout summary
+
+  ESP32-H2 DevKitM-1
+  ┌──────────────────────┐
+  │  3.3V ──────────────────────────────────── C2(+) ── C2(-) ── GND
+  │                      │                              │
+  │  GND  ──────────────────────────────────────────────┘
+  │                      │
+  │  GPIO4 (SCK)  ───────────────── CC1101 SCK
+  │  GPIO5 (MOSI) ───────────────── CC1101 MOSI
+  │  GPIO6 (MISO) ───────────────── CC1101 MISO
+  │  GPIO2 (CSN)  ───────────────── CC1101 CSN
+  │  GPIO7 (GDO0) ───────────────── CC1101 GDO0
+  └──────────────────────┘
+                                    CC1101 VCC ── C1 ── CC1101 GND
+                                    (C1 sits right next to the module pins)
+
+  ---
+
+  Practical tip
+
+  Most pre-made CC1101 modules already have a small capacitor soldered on the
+  PCB near the VCC pin. Even so, add the external 100nF — it handles the
+  inductance of your connecting wires that the on-board cap cannot. Think of the
+  on-board cap as protecting the chip, and your external cap as protecting the
+  wire run from the ESP32-H2 to the module.
+
+> can you please add these wiring and layout details as comments in the yaml?
+
+  Thought for 2s (ctrl+o to expand)
+
+● I'll read the current config to make sure I'm working from the exact text
+  before editing.
+
+  Thought for 7s, read 1 file (ctrl+o to expand)
+
+● That file is a chat transcript. Let me find the actual YAML file for the
+  ESP32-H2 config.
+
+  Searched for 1 pattern (ctrl+o to expand)
+  ⎿  Interrupted · What should Claude do instead?
+
+> can you please add these wiring and layout details as comments in the yaml
+  above (not any existing yaml or transcript file)?
+
+  Thought for 3s (ctrl+o to expand)
+
+● Here is the full YAML with the capacitor and breadboard wiring details
+  embedded as comments:
+
+  #
+  =============================================================================
+  # ESPHome Configuration: 433MHz RF Bridge via CC1101 on ESP32-H2 (Zigbee)
+  #
+  =============================================================================
+  # Hardware: ESP32-H2-DevKitM-1 + CC1101 433MHz transceiver module
+  #
+  # Communication path:
+  #   Door chime button (433MHz) → CC1101 module → ESP32-H2 → Zigbee →
+  #   Zigbee coordinator (e.g. Sonoff Zigbee USB dongle) → Home Assistant
+  #
+  # IMPORTANT: The ESP32-H2 has NO WiFi. It communicates exclusively via
+  # IEEE 802.15.4 (Zigbee/Thread) and BLE. This means:
+  #   - You cannot use the standard ESPHome WiFi API or OTA
+  #   - You MUST have a Zigbee coordinator paired with Home Assistant
+  #   - Flashing is done via USB serial only (no wireless OTA)
+  #
+  =============================================================================
+
+  #
+  -----------------------------------------------------------------------------
+  # BILL OF MATERIALS
+  #
+  -----------------------------------------------------------------------------
+  #
+  #   1 × ESP32-H2-DevKitM-1 development board
+  #   1 × CC1101 433MHz pre-made module (8-pin, green PCB — includes crystal
+  #         oscillator and spring/helix antenna already soldered on)
+  #   1 × 100nF (0.1µF) ceramic capacitor, 10V rating or higher
+  #         (e.g. 16V or 25V rated parts are fine and commonly available)
+  #   1 × 10µF electrolytic capacitor, 10V rating or higher
+  #         (POLARISED — has a positive and negative leg, see wiring below)
+  #   Jumper wires / 2.54mm header pins
+  #   Breadboard (recommended for prototyping)
+  #
+  #
+  -----------------------------------------------------------------------------
+  # COMPLETE WIRING TABLE — ESP32-H2 DevKitM-1 to CC1101 module
+  #
+  -----------------------------------------------------------------------------
+  #
+  #   CC1101 pin │ ESP32-H2 pin │ Notes
+  #   ───────────┼──────────────┼──────────────────────────────────────────────
+  #   VCC        │ 3.3V         │ Must be 3.3V — do NOT connect to 5V.
+  #              │              │ The CC1101 and its module PCB are not 5V
+  #              │              │ tolerant; 5V will permanently damage the chip.
+  #   GND        │ GND          │
+  #   SCK        │ GPIO4        │ SPI clock line
+  #   MOSI (SI)  │ GPIO5        │ SPI data: ESP32-H2 → CC1101
+  #   MISO (SO)  │ GPIO6        │ SPI data: CC1101 → ESP32-H2
+  #              │              │ (This pin is labelled GDO1 on the CC1101 chip
+  #              │              │  but is exposed as MISO/SO on the module.)
+  #   CSN (CS)   │ GPIO2        │ SPI chip select, active LOW
+  #   GDO0       │ GPIO7        │ RF data / interrupt — the key signal pin.
+  #              │              │ Carries demodulated baseband data in RX mode;
+  #              │              │ mirrors TX data in transmit mode.
+  #   GDO2       │ GPIO10       │ Optional. Can signal carrier detect or act as
+  #              │              │ a TX gate. Leave unconnected if not needed.
+  #   ───────────┴──────────────┴──────────────────────────────────────────────
+  #
+  #   GPIO pins to AVOID on the ESP32-H2-DevKitM-1:
+  #     GPIO8  — connected to the onboard BOOT button
+  #     GPIO9  — used for JTAG/debug interface
+  #
+  #
+  -----------------------------------------------------------------------------
+  # DECOUPLING CAPACITOR WIRING
+  #
+  -----------------------------------------------------------------------------
+  #
+  # Decoupling capacitors suppress voltage rail noise caused by the CC1101
+  # drawing sudden bursts of current during SPI transactions and RF switching.
+  # Without them, these current spikes cause brief voltage dips that can corrupt
+  # SPI reads or produce erratic RF behaviour.
+  #
+  # KEY RULE: shorter leads = better performance.
+  # A capacitor placed 10 cm away via long wires has too much inductance to
+  # respond fast enough at high frequencies — it effectively stops working.
+  # Place capacitors as physically close to the relevant pins as possible.
+  #
+  #
+  # CAPACITOR 1 — 100nF ceramic (high-frequency bypass)
+  # ────────────────────────────────────────────────────
+  # Purpose:  Filters fast, high-frequency switching noise generated by the
+  #           CC1101 chip itself during SPI and RF activity.
+  # Value:    100nF (0.1µF)
+  # Type:     Ceramic — NOT polarised. Either leg can go to VCC or GND.
+  # Rating:   10V minimum (16V or 25V parts are equally fine)
+  # Connect:  Between the CC1101 module's VCC pin and the CC1101 module's GND
+  pin
+  # Placement: As close to the module's VCC pin as physically possible.
+  #           On a breadboard, insert the capacitor legs into the same two rows
+  #           as the module's VCC and GND pins — directly adjacent, not at the
+  #           far end of the power rail strip.
+  #
+  # Note: most pre-made CC1101 modules already have a small capacitor soldered
+  # on the PCB near the VCC pin. Add this external 100nF anyway — it handles
+  # the inductance of your connecting wires that the on-board cap cannot.
+  #
+  #
+  # CAPACITOR 2 — 10µF electrolytic (bulk charge reservoir)
+  # ─────────────────────────────────────────────────────────
+  # Purpose:  Provides a local charge reservoir to supply the sudden current
+  #           demand when the CC1101 powers up its TX/RX circuitry. Prevents
+  #           sag on the 3.3V rail that would affect the ESP32-H2 as well.
+  # Value:    10µF
+  # Type:     Electrolytic — POLARISED. Polarity MUST be correct or the
+  #           capacitor will fail, potentially with heat or rupture.
+  # Rating:   10V minimum
+  # Connect:  Between the ESP32-H2's 3.3V output pin and GND
+  # Placement: Close to where the 3.3V wire leaves the ESP32-H2 board toward
+  #           the CC1101 module.
+  #
+  # POLARITY — CRITICAL:
+  #   Longer leg  (+) positive → connect to 3.3V
+  #   Shorter leg (−) negative → connect to GND
+  #   The negative leg is also marked with a white stripe printed on the
+  #   side of the cylindrical body of the capacitor.
+  #
+  #
+  # BREADBOARD LAYOUT (top-down view, simplified)
+  # ──────────────────────────────────────────────
+  #
+  #  ESP32-H2 DevKitM-1
+  #  ┌───────────────────────────┐
+  #  │ 3.3V ─────────────────────┼──┬───────────────────── C2(+)─C2(−)─┐
+  #  │                           │  │                                    │
+  #  │ GND  ─────────────────────┼──┼────────────────────────────────────┘
+  #  │                           │  │                        (C2 = 10µF
+  electrolytic,
+  #  │ GPIO4 (SCK)  ─────────────┼──┼──── CC1101 SCK          sits near 3.3V/GND
+  #  │ GPIO5 (MOSI) ─────────────┼──┼──── CC1101 MOSI         rail on the board)
+  #  │ GPIO6 (MISO) ─────────────┼──┼──── CC1101 MISO
+  #  │ GPIO2 (CSN)  ─────────────┼──┼──── CC1101 CSN
+  #  │ GPIO7 (GDO0) ─────────────┼──┼──── CC1101 GDO0
+  #  └───────────────────────────┘  │
+  #                                 │     CC1101 VCC ──┬── 3.3V rail
+  #                                 └─────────────────┘
+  #                                       CC1101 GND ──── GND rail
+  #                                             │
+  #                                        C1 (100nF ceramic)
+  #                                        sits directly between
+  #                                        the CC1101 VCC and GND
+  #                                        rows on the breadboard
+  #
+  #
+  =============================================================================
+
+  esphome:
+    name: doorbell-rf-bridge
+    # Friendly name shown in Home Assistant's device registry
+    friendly_name: Doorbell RF Bridge
+
+  #
+  -----------------------------------------------------------------------------
+  # ESP32-H2 Platform Configuration
+  #
+  -----------------------------------------------------------------------------
+  esp32:
+    board: esp32h2-devkitm-1
+    variant: ESP32H2  # Explicitly declare the H2 variant (distinct from S2, S3,
+  C3)
+
+    framework:
+      type: esp-idf   # esp-idf is REQUIRED for ESP32-H2; the Arduino framework
+                      # does not support the H2 variant. Also required for
+  Zigbee.
+      version: recommended  # Lets ESPHome pick the version it was tested
+  against.
+                            # Pin to a specific version (e.g. "5.2.1") if you
+  need
+                            # reproducible builds.
+
+  #
+  -----------------------------------------------------------------------------
+  # Logger
+  #
+  -----------------------------------------------------------------------------
+  logger:
+    level: DEBUG  # Use DEBUG during initial setup to see raw RF codes in the
+                  # serial output. Switch to INFO or WARN in production to
+  reduce
+                  # log noise and save flash write cycles.
+    # Logs are only accessible via USB serial on the ESP32-H2 (no WiFi logging).
+
+  #
+  -----------------------------------------------------------------------------
+  # SPI Bus — used by the CC1101 transceiver module
+  #
+  -----------------------------------------------------------------------------
+  # The CC1101 is a full-duplex SPI device (Mode 0, MSB first, up to ~6.5 MHz).
+  # ESP32-H2 has a flexible GPIO matrix — any GPIO can be assigned to SPI,
+  # but the pins below align with the hardware FSPI peripheral for best
+  performance.
+  #
+  # Physical wiring (repeated here for convenience — full table at top of file):
+  #   CC1101 SCK  → GPIO4   (SPI clock — idles low, clocks on rising edge)
+  #   CC1101 MOSI → GPIO5   (Master Out Slave In — data ESP32→CC1101)
+  #   CC1101 MISO → GPIO6   (Master In Slave Out  — data CC1101→ESP32)
+  #   CC1101 CSN  → GPIO2   (Chip Select, active LOW — defined under cc1101:)
+  #   CC1101 GDO0 → GPIO7   (General-purpose digital output 0 — carries RF data)
+  #   CC1101 GDO2 → GPIO10  (Optional: carrier detect or TX gate — not used
+  here)
+  #   CC1101 VCC  → 3.3V    (The module must NOT be connected to 5V)
+  #   CC1101 GND  → GND
+  #
+  # Decoupling capacitors (see full detail at top of file):
+  #   C1 100nF ceramic — between CC1101 VCC pin and CC1101 GND pin,
+  #                      as close to the module as possible
+  #   C2 10µF electrolytic — between ESP32-H2 3.3V pin and GND,
+  #                          positive leg (+, longer) to 3.3V,
+  #                          negative leg (−, shorter, white stripe) to GND
+  #
+  # Note: the MISO line (GDO1 on the CC1101 chip) doubles as SPI MISO;
+  # it is only driven when CSN is asserted, so it does not interfere with
+  # GDO0 or GDO2 during normal operation.
+  spi:
+    clk_pin: GPIO4
+    mosi_pin: GPIO5
+    miso_pin: GPIO6
+
+  #
+  -----------------------------------------------------------------------------
+  # CC1101 External Component
+  #
+  -----------------------------------------------------------------------------
+  # ESPHome does not include a CC1101 driver in its core component library.
+  # An external component sourced from the community is required.
+  #
+  # The example below references a commonly cited community implementation.
+  # BEFORE using it you should:
+  #   1. Verify the repository is still actively maintained.
+  #   2. Check the repo's README for any ESPHome version requirements.
+  #   3. Review the source code briefly — external components run on your
+  device.
+  #
+  # Alternatives: search the ESPHome community forum and GitHub for
+  # "esphome cc1101 external_components" to find other maintained options.
+  external_components:
+    - source:
+        type: git
+        url: https://github.com/dbuezas/esphome-cc1101
+        ref: main  # Pin to a specific commit hash for production stability,
+                   # e.g. ref: "abc1234", so an upstream update cannot break
+                   # your device silently during the next compile.
+      components: [cc1101]  # Only pull in the cc1101 component, not everything.
+
+  #
+  -----------------------------------------------------------------------------
+  # CC1101 Radio Configuration
+  #
+  -----------------------------------------------------------------------------
+  cc1101:
+    id: cc1101_rf       # Internal ESPHome ID — used to reference this radio
+                        # instance elsewhere in the config if needed.
+
+    cs_pin: GPIO2       # Chip Select: pulled LOW by ESPHome to begin each SPI
+                        # transaction. Must not be shared with any other SPI
+  device.
+
+    gdo0_pin: GPIO7     # GDO0 is the CC1101's configurable digital output.
+                        # In receive mode it transitions high when the RF data
+                        # pin carries a demodulated signal, giving the
+                        # remote_receiver component its input edge stream.
+                        # In transmit mode the CC1101 is configured to mirror
+                        # the serial TX data back on this pin.
+
+    bandwidth: 200      # Receiver channel filter bandwidth in kHz.
+                        # 200 kHz is a good general-purpose value for 433 MHz
+                        # OOK/ASK devices. Narrow it (e.g. 100) for better
+                        # noise rejection once your protocol is confirmed.
+                        # Widen it (e.g. 325) if you see missed packets.
+
+    frequency: 433920   # Centre frequency in kHz = 433.920 MHz.
+                        # This is the ISM band frequency used by the vast
+  majority
+                        # of European/UK/AU 433 MHz devices including most door
+                        # chimes. North American devices often use 315 MHz —
+                        # change this value and re-pair if signals are not
+  detected.
+
+  #
+  -----------------------------------------------------------------------------
+  # RF Receiver — decodes incoming 433 MHz signals from the chime transmitter
+  #
+  -----------------------------------------------------------------------------
+  # The remote_receiver component watches the GDO0 pin for pulse-width-modulated
+  # digital transitions that represent the demodulated RF baseband signal.
+  # It can decode many common protocols automatically (RC switch, LaCrosse,
+  # etc.) and will also dump unknown signals as raw microsecond timings.
+  remote_receiver:
+    pin:
+      number: GPIO7
+      # GDO0 idles LOW when no signal is present; the CC1101 drives it HIGH
+      # during reception. No pull-up or pull-down resistor is needed on this
+      # pin — the CC1101 actively drives it both ways.
+      inverted: false
+
+    dump: all   # DISCOVERY MODE: log every received signal to serial output,
+                # including its decoded protocol name and code value, or raw
+                # pulse timings if the protocol is unrecognised.
+                # How to use: press your doorbell button and watch the serial
+                # log. Note the protocol (e.g. "RC switch protocol 1") and the
+                # hex/decimal code. Once captured, you can replace dump: all
+                # with dump: [] to silence the log spam, and use the captured
+                # code in a binary_sensor trigger below.
+
+    tolerance: 50%  # How much timing variation is accepted when matching pulses
+                    # to a known protocol. Battery-powered RF remotes and cheap
+                    # oscillators can drift significantly — 50% is permissive
+                    # enough to catch most real-world devices without causing
+                    # false positives on a 433 MHz band that is fairly busy.
+
+    filter: 4us     # Ignore any pulses shorter than 4 microseconds.
+                    # Eliminates glitch spikes from electrical noise before they
+                    # reach the protocol decoder. Raise to 8–10 us if you get
+                    # phantom triggers with nothing pressed.
+
+    idle: 4ms       # Declare a transmission complete after 4 ms of silence.
+                    # Most 433 MHz OOK protocols send a sync gap of 5–10 ms
+                    # between repeated frames; 4 ms balances responsiveness
+                    # against splitting a multi-frame burst into false events.
+
+  #
+  -----------------------------------------------------------------------------
+  # RF Transmitter — replays 433 MHz signals (optional, e.g. to trigger a
+  # remote chime sounder from Home Assistant)
+  #
+  -----------------------------------------------------------------------------
+  # The same GDO0 pin is used for both RX and TX. The CC1101 component
+  # automatically switches the radio between receive and transmit modes.
+  # Do not connect two separate pins for TX and RX — the CC1101 is a
+  # half-duplex transceiver and routes both through GDO0 in this configuration.
+  remote_transmitter:
+    pin: GPIO7
+
+    carrier_duty_percent: 100%  # OOK/ASK modulation carries no sub-carrier —
+                                 # the RF signal is simply keyed on/off by the
+                                 # baseband data. Use 100% duty (no carrier) for
+                                 # OOK. If you ever need FSK or a device that
+                                 # requires a 38 kHz carrier, adjust this and
+                                 # add a carrier_frequency entry.
+
+  #
+  -----------------------------------------------------------------------------
+  # Zigbee Configuration
+  #
+  -----------------------------------------------------------------------------
+  # The ESP32-H2 communicates with Home Assistant exclusively via Zigbee.
+  # Pairing process:
+  #   1. Flash this firmware via USB.
+  #   2. In Home Assistant → Zigbee2MQTT (or ZHA), open "permit join".
+  #   3. Power-cycle the ESP32-H2 — it will announce itself and pair.
+  #   4. The device will appear as a custom Zigbee end device.
+  #
+  # NOTE: ESPHome's zigbee: component is under active development as of 2025.
+  # The syntax below represents the general structure — cross-check against
+  # the current ESPHome Zigbee documentation for your installed version,
+  # as field names and cluster IDs may differ.
+  zigbee:
+    id: zb
+    # The ESP32-H2 will operate as a Zigbee End Device (ZED), not a router.
+    # ZED devices can sleep between events, conserving power. If you add
+    # deep_sleep: to the config, coordinate the Zigbee poll interval so the
+    # coordinator does not mark the device as offline between wake cycles.
+
+  #
+  -----------------------------------------------------------------------------
+  # Binary Sensor — door chime / doorbell button
+  #
+  -----------------------------------------------------------------------------
+  binary_sensor:
+    - platform: template
+      id: doorbell_button
+      name: "Doorbell"
+      # This sensor reports to Home Assistant via Zigbee.
+      # It becomes "on" when the lambda below returns true, and reverts to
+      # "off" after the delayed_off filter expires (2 seconds below).
+
+      #
+  -------------------------------------------------------------------------
+      # HOW TO POPULATE THE TRIGGER CODE
+      #
+  -------------------------------------------------------------------------
+      # Step 1: Flash this config with dump: all in remote_receiver (already
+  set).
+      # Step 2: Open the ESPHome serial log (115200 baud via USB).
+      # Step 3: Press your doorbell button several times.
+      # Step 4: Look for lines like:
+      #           [D][remote.rc_switch] Received RC Switch: protocol=1,
+  data=0x1234AB
+      #         or for raw timing:
+      #           [D][remote.raw] Received Raw: 450, -1350, 450, -450, ...
+      # Step 5: Note the protocol number and hex code.
+      # Step 6: Replace the on_press action below with a dedicated
+      #         remote_receiver binary_sensor using that code.
+      #
+      # Example for an RC Switch protocol 1 doorbell with code 0x1234AB:
+      #
+      #   binary_sensor:
+      #     - platform: remote_receiver
+      #       name: "Doorbell"
+      #       rc_switch_raw:
+      #         code: "0x1234AB"
+      #         protocol: 1
+      #       filters:
+      #         - delayed_off: 2s
+      #
+      # Using remote_receiver directly (rather than template) is preferred
+      # because ESPHome handles the timing and protocol match natively.
+      #
+  -------------------------------------------------------------------------
+
+      filters:
+        - delayed_off: 2s   # After the sensor triggers, hold it in the "on"
+                            # state for 2 seconds before returning to "off".
+                            # This prevents rapid re-triggering if the chime
+                            # transmitter sends its code multiple times per
+  press
+                            # (most do — typically 3–8 repeats per button
+  press).
+
+      on_press:
+        - logger.log:
+            level: INFO
+            format: "Doorbell pressed — signalling via Zigbee"
+
+> Can you now output that to esphome-esp32h1-433mhz-C1101.yaml
+
+  Thought for 2s (ctrl+o to expand)
+
+● Write(esphome-esp32h1-433mhz-C1101.yaml)
+  ⎿  Wrote 378 lines to esphome-esp32h1-433mhz-C1101.yaml
+       1 # ==============================================================
+       2 # ESPHome Configuration: 433MHz RF Bridge via CC1101 on ESP32-H2
+       3 # ==============================================================
+         ===============
+         e
+       6 # Communication path:
+         ee →
+       8 #   Zigbee coordinator (e.g. Sonoff Zigbee USB dongle) → Home As
+       9 #
+         ly via
+     … +534 lines (ctrl+o to expand)
+
+● Saved to esphome-esp32h1-433mhz-C1101.yaml. Note the filename uses h1 as you
+  specified — if that was a typo and you meant h2 to match the chip, just say
+  and I'll rename it.
+
+> yes that was a typo
+
+  Thought for 2s, ran 1 shell command (ctrl+o to expand)
+
+● Renamed to esphome-esp32h2-433mhz-C1101.yaml.
