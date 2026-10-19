@@ -1,0 +1,237 @@
+# ════════════════════════════════════════════════════════════════════════════════
+#  ESPHome configuration — Sonoff RF Bridge R2 v2.2
+#
+#  What this does:
+#    1. Listens for 433MHz RF signals via the onboard EFM8BB1 RF co-processor.
+#    2. Reports a "doorbell pressed" event to Home Assistant over WiFi.
+#    3. Exposes a button in Home Assistant that transmits a 433MHz code to
+#       trigger the chime unit to ring on demand.
+#
+#  Hardware notes:
+#    - The Sonoff RF Bridge R2 uses an ESP8285 (ESP8266 with built-in flash).
+#    - A separate EFM8BB1 RF co-processor handles all 433MHz encoding/decoding.
+#    - The two chips talk to each other over the ESP's hardware UART (GPIO1/GPIO3).
+#    - Because of this shared UART, normal serial logging MUST be disabled.
+#
+#  Setup phases:
+#    Phase 1 — Code discovery: flash this config as-is, watch ESPHome logs, then
+#              press your doorbell remote and note the logged sync/low/high/code
+#              values that repeat consistently.
+#    Phase 2 — Deployment: fill in those captured values in the two marked places
+#              below and reflash OTA.
+# ════════════════════════════════════════════════════════════════════════════════
+
+
+# ──────────────────────────────────────────
+#  Core device identity
+#
+#  "name" is the internal hostname ESPHome uses (OTA, mDNS, log prefix).
+#  "friendly_name" is what appears in Home Assistant's device registry.
+# ──────────────────────────────────────────
+esphome:
+  name: sonoff-rf-bridge
+  friendly_name: Sonoff RF Bridge
+
+
+# ──────────────────────────────────────────
+#  Hardware target
+#
+#  The Sonoff RF Bridge R2 uses an ESP8285 — this is an ESP8266 with 1MB
+#  of flash memory built directly into the chip package.  Telling ESPHome
+#  the correct board ensures correct pin mappings and flash layout.
+# ──────────────────────────────────────────
+esp8266:
+  board: esp8285
+
+
+# ──────────────────────────────────────────
+#  Serial logging  *** CRITICAL SETTING ***
+#
+#  Normally ESPHome uses GPIO1 (TX) and GPIO3 (RX) to print log messages over
+#  USB serial.  On the RF Bridge, those exact same pins are wired to the
+#  EFM8BB1 RF co-processor.  If ESPHome tries to use them for logging at the
+#  same time, the log output corrupts the RF protocol, and the RF chip stops
+#  responding entirely.
+#
+#  Setting baud_rate: 0 disables UART logging output completely, freeing the
+#  pins for exclusive use by the RF chip.  Log messages are still visible when
+#  the device is connected to the ESPHome dashboard over WiFi.
+# ──────────────────────────────────────────
+logger:
+  baud_rate: 0  # MUST be 0 — GPIO1/GPIO3 are reserved for the RF co-processor
+
+
+# ──────────────────────────────────────────
+#  WiFi connection
+#
+#  Credentials are read from a "secrets.yaml" file in the same directory.
+#  This keeps passwords out of version control.
+#
+#  The "ap" block creates a fallback WiFi hotspot if the main network is
+#  unreachable (e.g. wrong password, router down).  Connect to it from your
+#  phone to fix credentials without reflashing.
+# ──────────────────────────────────────────
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "RF-Bridge Fallback"
+    password: "changeme123"
+
+
+# ──────────────────────────────────────────
+#  Captive portal
+#
+#  Works alongside the fallback hotspot above.  When you connect to the
+#  fallback AP, it redirects your browser to a configuration page where you
+#  can enter new WiFi credentials without any serial connection.
+# ──────────────────────────────────────────
+captive_portal:
+
+
+# ──────────────────────────────────────────
+#  Home Assistant API
+#
+#  This is the encrypted channel used for communication between ESPHome and
+#  Home Assistant.  The encryption key prevents other devices on your network
+#  from impersonating or intercepting the connection.
+#
+#  Without this block, the device will still work but Home Assistant cannot
+#  receive real-time state updates or call actions on it.
+# ──────────────────────────────────────────
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+
+# ──────────────────────────────────────────
+#  Over-the-Air updates
+#
+#  After the first serial flash, all future firmware updates can be sent
+#  wirelessly via "esphome run rf-bridge.yaml" without opening the device.
+#  The password prevents unauthorised firmware from being pushed.
+# ──────────────────────────────────────────
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+
+# ──────────────────────────────────────────
+#  UART bus  (ESP8285 ↔ EFM8BB1 RF co-processor)
+#
+#  This defines the serial communication channel between the ESP chip and the
+#  onboard EFM8BB1 RF co-processor.  The co-processor does all the heavy
+#  lifting: it samples the 433MHz antenna, decodes incoming RF pulses into
+#  packets, and encodes outgoing packets into RF pulses.
+#
+#  GPIO1 and GPIO3 are the ESP8285's only hardware UART pins and they are
+#  physically connected to the RF chip on the RF Bridge PCB — you cannot
+#  change these.
+#
+#  19200 baud is the fixed speed the EFM8BB1 firmware expects.  Using any
+#  other speed will produce garbled communication.
+# ──────────────────────────────────────────
+uart:
+  id: uart_bus
+  tx_pin: GPIO1   # ESP transmits commands TO the RF chip on this pin
+  rx_pin: GPIO3   # ESP receives RF packet data FROM the RF chip on this pin
+  baud_rate: 19200
+
+
+# ──────────────────────────────────────────
+#  RF Bridge component
+#
+#  This component speaks the EFM8BB1 protocol over the UART defined above.
+#  It translates raw serial bytes into ESPHome events, and ESPHome actions
+#  into serial commands the RF chip can execute.
+#
+#  on_code_received fires every time the RF chip detects and decodes a valid
+#  433MHz packet.  The lambda here logs the four values that describe the
+#  packet — sync, low, high, and code.  These values are what you need to
+#  record during Phase 1 code discovery.
+#
+#  What each value means:
+#    sync  — the length of the synchronisation pulse (in microseconds × some
+#             factor).  Acts like a "start of frame" marker.
+#    low   — the timing length used to represent a binary 0 bit.
+#    high  — the timing length used to represent a binary 1 bit.
+#    code  — the actual data payload (your doorbell's unique identifier).
+# ──────────────────────────────────────────
+rf_bridge:
+  uart_id: uart_bus
+  on_code_received:
+    then:
+      - lambda: |-
+          ESP_LOGI("rf_bridge", "Received: sync=0x%08X low=0x%08X high=0x%08X code=0x%08X",
+            data.sync, data.low, data.high, data.code);
+          // During Phase 1, press your remote and note the values printed here.
+          // The same combination should appear 3-10 times per button press.
+          // Use the most consistently repeated set as your "real" code.
+
+
+# ──────────────────────────────────────────
+#  Doorbell binary sensor  (RF → Home Assistant)
+#
+#  Watches the rf_bridge component for a packet whose code matches the one
+#  your doorbell remote transmits.  When a match is found, this sensor
+#  flips to "on" in Home Assistant, which you can use as a trigger in
+#  automations (send a notification, flash a light, start recording, etc.).
+#
+#  rf_code — a space-separated hex byte string representing the raw packet
+#    the RF chip sends to the ESP.  You capture this during Phase 1.
+#    Example: "A5 20 BC 00"
+#
+#  device_class: occupancy — tells Home Assistant to represent this as a
+#    presence/motion-style sensor.  You can also use "door" or "sound"
+#    depending on which icon and behaviour you prefer in the UI.
+#
+#  delayed_off — after the sensor turns on, it stays "on" for this duration
+#    before returning to "off".  A single button press typically fires
+#    3-10 identical RF packets in rapid succession.  Without this filter,
+#    Home Assistant would see a rapid on/off/on/off flicker, which can
+#    trigger automations multiple times.  2 seconds is long enough to cover
+#    the burst, but short enough to feel responsive.
+#
+#  PHASE 2 — Replace the rf_code placeholder with the hex string you
+#    captured from the logs during Phase 1.
+# ──────────────────────────────────────────
+binary_sensor:
+  - platform: rf_bridge
+    name: "Door Chime Remote"
+    device_class: occupancy
+    filters:
+      - delayed_off: 2s
+    rf_code: "A5 20 BC 00"  # REPLACE with your remote's actual code from Phase 1 logs
+
+
+# ──────────────────────────────────────────
+#  Ring Chime button  (Home Assistant → RF)
+#
+#  Exposes a pressable button in Home Assistant.  When pressed — either
+#  manually in the HA UI or triggered by an automation — the ESP8285 sends
+#  a command to the RF co-processor to transmit the doorbell code over
+#  433MHz, causing the chime unit to ring as if the physical button was
+#  pressed.
+#
+#  send_code action parameters:
+#    sync  — synchronisation pulse timing (must match what the chime expects)
+#    low   — timing for a binary 0 bit
+#    high  — timing for a binary 1 bit
+#    code  — the data payload the chime receiver recognises as "ring now"
+#
+#  All four values come from the Phase 1 log capture.  If your doorbell
+#  remote and chime unit are a matched pair, the code you captured from the
+#  remote is the same code the chime expects to receive — use the same values
+#  in both this button and the binary_sensor above.
+#
+#  PHASE 2 — Replace all four 0x placeholder values with what you captured.
+# ──────────────────────────────────────────
+button:
+  - platform: template
+    name: "Ring Door Chime"
+    on_press:
+      - rf_bridge.send_code:
+          sync: 0x004E      # REPLACE — synchronisation pulse timing from Phase 1
+          low:  0x00AE      # REPLACE — binary 0 bit timing from Phase 1
+          high: 0x00B8      # REPLACE — binary 1 bit timing from Phase 1
+          code: 0xA520BC00  # REPLACE — the chime's unique identifier from Phase 1
