@@ -91,70 +91,10 @@ logger:
   level: INFO
 
 # ── Zigbee ────────────────────────────────────────────────────────────────────
+# Endpoints are assigned via the `endpoint:` key on each entity below.
+# ESPHome infers the Zigbee cluster type from the entity kind automatically.
 
 zigbee:
-  endpoints:
-    - num: 1
-      device_type: TEMPERATURE_SENSOR
-      cluster_list:
-        - id: TEMP_MEASUREMENT
-          attributes:
-            - attr_id: MEASURED_VALUE
-              value_ref: temp_1
-
-    - num: 2
-      device_type: TEMPERATURE_SENSOR
-      cluster_list:
-        - id: TEMP_MEASUREMENT
-          attributes:
-            - attr_id: MEASURED_VALUE
-              value_ref: temp_2
-
-    # ON = relay energized = NC contacts open = circuit disconnected
-    # OFF / default = relay de-energized = NC contacts closed = circuit connected
-    - num: 3
-      device_type: ON_OFF_OUTPUT
-      cluster_list:
-        - id: ON_OFF
-          attributes:
-            - attr_id: ON_OFF
-              value_ref: relay
-
-    # HA must toggle this every hour to prove it is reachable. Either transition
-    # (on→off or off→on) counts as a valid heartbeat ping.
-    - num: 4
-      device_type: ON_OFF_OUTPUT
-      cluster_list:
-        - id: ON_OFF
-          attributes:
-            - attr_id: ON_OFF
-              value_ref: ha_heartbeat
-
-    # Writable curve parameters — HA can adjust these at runtime via Zigbee.
-    # Values persist to flash; reset to substitution defaults on heartbeat timeout.
-    - num: 5
-      device_type: ANALOG_VALUE
-      cluster_list:
-        - id: ANALOG_VALUE
-          attributes:
-            - attr_id: PRESENT_VALUE
-              value_ref: curve_temp_low
-
-    - num: 6
-      device_type: ANALOG_VALUE
-      cluster_list:
-        - id: ANALOG_VALUE
-          attributes:
-            - attr_id: PRESENT_VALUE
-              value_ref: curve_temp_high
-
-    - num: 7
-      device_type: ANALOG_VALUE
-      cluster_list:
-        - id: ANALOG_VALUE
-          attributes:
-            - attr_id: PRESENT_VALUE
-              value_ref: curve_fan_min_pct
 
 # ── Hardware ──────────────────────────────────────────────────────────────────
 
@@ -212,6 +152,7 @@ number:
     initial_value: $default_temp_low
     optimistic: true
     restore_value: true
+    endpoint: 5
 
   - platform: template
     name: "Curve Temp High"
@@ -223,6 +164,7 @@ number:
     initial_value: $default_temp_high
     optimistic: true
     restore_value: true
+    endpoint: 6
 
   - platform: template
     name: "Fan Min Speed"
@@ -234,6 +176,7 @@ number:
     initial_value: $default_fan_min_pct
     optimistic: true
     restore_value: true
+    endpoint: 7
 
 # ── Switches ──────────────────────────────────────────────────────────────────
 
@@ -255,6 +198,7 @@ switch:
     name: "Relay"
     icon: "mdi:electric-switch"
     restore_mode: ALWAYS_OFF
+    endpoint: 3
     on_turn_on:
       - script.execute: auto_reconnect   # arms the disconnection timer
     on_turn_off:
@@ -269,6 +213,7 @@ switch:
     id: ha_heartbeat
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
+    endpoint: 4
     on_turn_on:
       - globals.set:
           id: hours_no_heartbeat
@@ -301,6 +246,7 @@ sensor:
     unit_of_measurement: "°C"
     accuracy_decimals: 1
     update_interval: 10s
+    endpoint: 1
     on_value:
       then:
         - lambda: |-
@@ -335,6 +281,7 @@ sensor:
     unit_of_measurement: "°C"
     accuracy_decimals: 1
     update_interval: 10s
+    endpoint: 2
     on_value:
       then:
         - lambda: |-
