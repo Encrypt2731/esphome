@@ -2,11 +2,25 @@
 # ESPHome Fan Controller — Seeed XIAO ESP32-S3 (WiFi)
 #
 # Pinout (XIAO board labels):
-#   D3 / GPIO4  — DS18B20 sensor 1 (1-Wire; fit 4.7kΩ pull-up to 3.3V externally)
-#   D4 / GPIO5  — DS18B20 sensor 2 (1-Wire; fit 4.7kΩ pull-up to 3.3V externally)
-#   D5 / GPIO6  — Fan 1 PWM signal (25 kHz; wire to PWM pin of 4-pin PC fan header)
+#   D0 / GPIO1  — DS18B20 sensor 1 (1-Wire; fit 4.7kΩ pull-up to 3.3V externally)
+#   D1 / GPIO2  — DS18B20 sensor 2 (1-Wire; fit 4.7kΩ pull-up to 3.3V externally)
+#   D4 / GPIO5  — Fan 1 PWM signal (25 kHz; wire to PWM pin of 4-pin PC fan header)
+#   D5 / GPIO6  — Fan 1 RPM signal (tachometer; internal pull-up enabled)
 #   D8 / GPIO7  — Fan 2 PWM signal (25 kHz; wire to PWM pin of 4-pin PC fan header)
-#   D9 / GPIO8  — Relay signal     (wire to NC terminals — see relay safety note below)
+#   D9 / GPIO8  — Fan 2 RPM signal (tachometer; internal pull-up enabled)
+#   D10 / GPIO9 — Relay signal     (wire to NC terminals — see relay safety note below)
+#
+#   Fan PWM and RPM pins are physically adjacent on the board for each fan:
+#     Fan 1 — D4/D5 (left side, pins 5 & 6)
+#     Fan 2 — D8/D9 (right side, adjacent pair)
+#
+# Tachometer wiring note:
+#   The fan tachometer pin is open-collector and requires a pull-up. The
+#   internal pull-up (enabled in config) is sufficient; a 10kΩ external
+#   resistor to 3.3V is more reliable if signal noise is observed. Do NOT
+#   use a 5V pull-up — the ESP32-S3 GPIO is not 5V tolerant.
+#   Most 4-pin PC fans emit 2 pulses per revolution. If reported RPM is
+#   exactly half of expected, change the multiply filter below from 0.5 to 0.25.
 #
 # Connectivity:
 #   Connects to Home Assistant over WiFi using ESPHome's native API.
@@ -20,7 +34,7 @@
 # RELAY MODULE TYPE — active-low (optocoupler-based):
 #   These modules energise the coil when the input signal is LOW, not HIGH.
 #   The pin is therefore declared with inverted: true so that the ESPHome
-#   switch's logical OFF state drives GPIO8 HIGH (coil de-energised) and the
+#   switch's logical OFF state drives GPIO9 HIGH (coil de-energised) and the
 #   logical ON state drives it LOW (coil energised).
 #
 # WIRING — use NC (normally closed) terminals on the relay module:
@@ -30,12 +44,11 @@
 #   commanded. A power cut de-energises the coil and the circuit closes safely.
 #
 # BOOT SAFETY — no external pull resistor required:
-#   While the ESP32-S3 is in reset (GPIO8 is high-impedance), the relay
+#   While the ESP32-S3 is in reset (GPIO9 is high-impedance), the relay
 #   module's own internal pull-up holds the signal HIGH, keeping the coil
 #   de-energised throughout the entire boot sequence. Once firmware starts,
-#   ALWAYS_OFF + inverted: true drives GPIO8 HIGH — the same safe state.
-#   No external resistor is needed; do not fit a pull-down on GPIO8 as it
-#   would fight the relay module's pull-up.
+#   ALWAYS_OFF + inverted: true drives GPIO9 HIGH — the same safe state.
+#   Do not fit a pull-down on GPIO9 as it would fight the relay module's pull-up.
 #
 # SOFTWARE — ALWAYS_OFF restore mode:
 #   ALWAYS_OFF guarantees the switch is OFF on every boot regardless of any
@@ -102,17 +115,17 @@ ota:
 # Both require an external 4.7kΩ pull-up resistor to 3.3V.
 one_wire:
   - platform: gpio
-    pin: GPIO4
+    pin: GPIO1
     id: ow_bus_1
   - platform: gpio
-    pin: GPIO5
+    pin: GPIO2
     id: ow_bus_2
 
 # LEDC is the ESP32 hardware PWM peripheral. 25 kHz is the standard PWM
 # frequency expected by 4-pin PC fan controllers.
 output:
   - platform: ledc
-    pin: GPIO6
+    pin: GPIO5
     id: fan1_output
     frequency: 25000Hz
 
@@ -180,7 +193,7 @@ switch:
   # coil de-energised. See the relay safety design note in the file header.
   - platform: gpio
     pin:
-      number: GPIO8
+      number: GPIO9
       inverted: true
     id: relay
     name: "Relay"
@@ -287,7 +300,7 @@ sensor:
             id(fan2_output).set_level(spd);
             id(fan2_speed).publish_state(spd * 100.0f);
 
-  # Read-only speed readbacks — exposed to HA for dashboards and automations
+  # Read-only commanded speed readbacks — exposed to HA for dashboards
   - platform: template
     name: "Fan 1 Speed"
     id: fan1_speed
@@ -301,6 +314,37 @@ sensor:
     unit_of_measurement: "%"
     accuracy_decimals: 0
     icon: "mdi:fan"
+
+  # Tachometer RPM readings — actual measured fan speed
+  - platform: pulse_counter
+    pin:
+      number: GPIO6
+      mode:
+        input: true
+        pullup: true
+    name: "Fan 1 RPM"
+    id: fan1_rpm
+    unit_of_measurement: "RPM"
+    accuracy_decimals: 0
+    icon: "mdi:fan"
+    update_interval: 10s
+    filters:
+      - multiply: 0.5   # 2 pulses per revolution → divide pulse/min count by 2
+
+  - platform: pulse_counter
+    pin:
+      number: GPIO8
+      mode:
+        input: true
+        pullup: true
+    name: "Fan 2 RPM"
+    id: fan2_rpm
+    unit_of_measurement: "RPM"
+    accuracy_decimals: 0
+    icon: "mdi:fan"
+    update_interval: 10s
+    filters:
+      - multiply: 0.5
 
   - platform: wifi_signal
     name: "WiFi Signal"
