@@ -116,7 +116,7 @@ script:
     then:
       - delay: $relay_max_disconnect
       - switch.turn_off: relay
-      - logger.log: "Relay closed by auto-reconnect timer"
+      - logger.log: "Relay closed by auto-reconnect timer (30s max)"
 
 # ── Adjustable curve parameters ───────────────────────────────────────────────
 
@@ -158,6 +158,7 @@ number:
 
 switch:
   - platform: gpio
+    name: "Kill switch (30s max)"
     pin: GPIO8
     id: relay
     name: "Relay"
