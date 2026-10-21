@@ -8,13 +8,6 @@
 #   D8 / GPIO7  — Fan 2 PWM signal (25 kHz; wire to PWM pin of 4-pin PC fan header)
 #   D9 / GPIO8  — Relay signal     (wire to NC terminals — see relay safety note below)
 #
-# GPIO notes vs the classic ESP32 WiFi version:
-#   The XIAO ESP32-S3 exposes only GPIO1–9, 43, 44. GPIO25/32/33 from the
-#   classic ESP32 version are not available. GPIO43/44 are UART0 TX/RX and are
-#   reserved for serial logging, so they are not used for control signals.
-#   GPIO6, GPIO7, GPIO8 have no special strapping or SPI-flash functions on
-#   the XIAO and are safe for PWM/relay use.
-#
 # Connectivity:
 #   Connects to Home Assistant over WiFi using ESPHome's native API.
 #   Credentials live in secrets.yaml — see the WiFi section below.
@@ -24,31 +17,47 @@
 # REQUIREMENT: the circuit must open ONLY upon an explicit HA command. Any
 # unintended opening (boot, power cut, firmware reset) is unacceptable.
 #
-# WIRING — use NC (normally closed) terminals on the relay module:
-#   Relay coil de-energized (GPIO LOW)  → NC contacts CLOSED → circuit CONNECTED
-#   Relay coil energized    (GPIO HIGH) → NC contacts OPEN   → circuit DISCONNECTED
+# RELAY MODULE TYPE — active-low (optocoupler-based):
+#   These modules energise the coil when the input signal is LOW, not HIGH.
+#   The pin is therefore declared with inverted: true so that the ESPHome
+#   switch's logical OFF state drives GPIO8 HIGH (coil de-energised) and the
+#   logical ON state drives it LOW (coil energised).
 #
-# HARDWARE PULL-DOWN — fit a 10kΩ resistor between GPIO8 (D9) and GND:
-#   During the MCU reset and ROM boot phase all GPIO pins are in an undefined
-#   floating state before firmware takes control. The external pull-down holds
-#   GPIO8 firmly at LOW throughout the entire boot sequence.
-#   Note: the ESP32-S3's internal pull-down is only active once firmware
-#   configures it — an external resistor is required to cover that window.
+# WIRING — use NC (normally closed) terminals on the relay module:
+#   Relay coil de-energised (GPIO HIGH) → NC contacts CLOSED → circuit CONNECTED
+#   Relay coil energised    (GPIO LOW)  → NC contacts OPEN   → circuit DISCONNECTED
+#   This means the circuit is closed by default and only opens when actively
+#   commanded. A power cut de-energises the coil and the circuit closes safely.
+#
+# BOOT SAFETY — no external pull resistor required:
+#   While the ESP32-S3 is in reset (GPIO8 is high-impedance), the relay
+#   module's own internal pull-up holds the signal HIGH, keeping the coil
+#   de-energised throughout the entire boot sequence. Once firmware starts,
+#   ALWAYS_OFF + inverted: true drives GPIO8 HIGH — the same safe state.
+#   No external resistor is needed; do not fit a pull-down on GPIO8 as it
+#   would fight the relay module's pull-up.
 #
 # SOFTWARE — ALWAYS_OFF restore mode:
-#   Once firmware is running, ALWAYS_OFF guarantees the GPIO is driven LOW on
-#   every boot regardless of any previously saved state. Combined with NC wiring
-#   this means the circuit is always closed at startup. The only event that
-#   drives GPIO8 HIGH (opening the circuit) is an explicit HA ON command via
-#   the ESPHome API. Boot, power restore, and the auto_reconnect timer all drive
-#   the pin LOW (closing the circuit).
+#   ALWAYS_OFF guarantees the switch is OFF on every boot regardless of any
+#   previously saved state. Combined with inverted: true and NC wiring this
+#   means the circuit is always closed at startup. The only event that opens
+#   the circuit is an explicit HA ON command via the ESPHome API.
 # ──────────────────────────────────────────────────────────────────────────────
 
 substitutions:
-  default_temp_low: "30.0"
-  default_temp_high: "60.0"
-  default_fan_min_pct: "20.0"
+  # Fan curve hardcoded defaults — used on first boot and restored when HA has
+  # been unreachable for longer than heartbeat_timeout_h hours
+  default_temp_low: "30.0"     # °C — fan ramping starts here
+  default_temp_high: "60.0"    # °C — fans run at 100% above this
+  default_fan_min_pct: "20.0"  # %  — minimum fan speed (keeps fans spinning)
+
+  # Hours of silence from HA before the device considers it unreachable and
+  # resets the curve parameters to the hardcoded defaults above
   heartbeat_timeout_h: "25"
+
+  # Maximum time the relay is allowed to stay open (circuit disconnected).
+  # The device closes the circuit automatically after this delay, even if HA
+  # has not issued a close command.
   relay_max_disconnect: "30s"
 
 esphome:
@@ -89,6 +98,8 @@ ota:
 
 # ── Hardware ──────────────────────────────────────────────────────────────────
 
+# Each DS18B20 is on its own 1-Wire bus so sensors are addressed independently.
+# Both require an external 4.7kΩ pull-up resistor to 3.3V.
 one_wire:
   - platform: gpio
     pin: GPIO4
@@ -97,6 +108,8 @@ one_wire:
     pin: GPIO5
     id: ow_bus_2
 
+# LEDC is the ESP32 hardware PWM peripheral. 25 kHz is the standard PWM
+# frequency expected by 4-pin PC fan controllers.
 output:
   - platform: ledc
     pin: GPIO6
@@ -111,14 +124,20 @@ output:
 # ── Scripts ───────────────────────────────────────────────────────────────────
 
 script:
+  # Enforces the maximum relay disconnection time. Armed automatically when
+  # the relay opens; cancelled when it closes. mode: restart means a second
+  # open command within the window resets the timer rather than stacking it.
   - id: auto_reconnect
     mode: restart
     then:
       - delay: $relay_max_disconnect
       - switch.turn_off: relay
-      - logger.log: "Relay closed by auto-reconnect timer (30s max)"
+      - logger.log: "Relay closed by auto-reconnect timer"
 
 # ── Adjustable curve parameters ───────────────────────────────────────────────
+# HA writes to these via the ESPHome API. restore_value: true persists the last
+# HA-set value to flash so custom settings survive a device reboot. When the
+# heartbeat watchdog fires, these are reset to the substitution defaults.
 
 number:
   - platform: template
@@ -157,18 +176,25 @@ number:
 # ── Switches ──────────────────────────────────────────────────────────────────
 
 switch:
+  # Relay — active-low module; inverted: true means switch OFF → GPIO HIGH →
+  # coil de-energised. See the relay safety design note in the file header.
   - platform: gpio
-    name: "Kill switch (30s max)"
-    pin: GPIO8
+    pin:
+      number: GPIO8
+      inverted: true
     id: relay
     name: "Relay"
     icon: "mdi:electric-switch"
     restore_mode: ALWAYS_OFF
     on_turn_on:
-      - script.execute: auto_reconnect
+      - script.execute: auto_reconnect   # arms the disconnection timer
     on_turn_off:
-      - script.stop: auto_reconnect
+      - script.stop: auto_reconnect      # cancels the timer if closed early
 
+  # Heartbeat — HA toggles this every hour. Any state change (on→off or off→on)
+  # resets the hours_no_heartbeat counter. If no toggle is received within
+  # heartbeat_timeout_h hours the device assumes HA is unreachable and resets
+  # the fan curve to hardcoded safe defaults.
   - platform: template
     name: "HA Heartbeat"
     id: ha_heartbeat
@@ -186,6 +212,9 @@ switch:
 # ── Globals ───────────────────────────────────────────────────────────────────
 
 globals:
+  # Counts hours elapsed since the last heartbeat from HA. Not persisted to
+  # flash — resets to 0 on reboot, giving HA time to reconnect before the
+  # fallback curve activates.
   - id: hours_no_heartbeat
     type: int
     restore_value: no
@@ -194,6 +223,8 @@ globals:
 # ── Sensors & fan control ─────────────────────────────────────────────────────
 
 sensor:
+  # Sensor 1 controls Fan 1. On every reading the lambda recalculates fan speed
+  # using the current curve parameters, then sets the LEDC PWM duty cycle.
   - platform: dallas_temp
     one_wire_id: ow_bus_1
     name: "Temperature 1"
@@ -227,6 +258,7 @@ sensor:
             id(fan1_output).set_level(spd);
             id(fan1_speed).publish_state(spd * 100.0f);
 
+  # Sensor 2 controls Fan 2 using the same curve logic.
   - platform: dallas_temp
     one_wire_id: ow_bus_2
     name: "Temperature 2"
@@ -255,6 +287,7 @@ sensor:
             id(fan2_output).set_level(spd);
             id(fan2_speed).publish_state(spd * 100.0f);
 
+  # Read-only speed readbacks — exposed to HA for dashboards and automations
   - platform: template
     name: "Fan 1 Speed"
     id: fan1_speed
