@@ -52,27 +52,9 @@ logger:
 # ── Zigbee ────────────────────────────────────────────────────────────────────
 
 zigbee:
-  endpoints:
-    # HA turns this ON to begin an irrigation session. The device turns it OFF
-    # automatically either after HA's chosen duration or at the 10-min hard cap,
-    # whichever comes first.
-    - num: 1
-      device_type: ON_OFF_OUTPUT
-      cluster_list:
-        - id: ON_OFF
-          attributes:
-            - attr_id: ON_OFF
-              value_ref: irrigation_relay
-
-    # HA must toggle this every hour to prove it is reachable. Either transition
-    # (on→off or off→on) counts as a valid heartbeat ping.
-    - num: 2
-      device_type: ON_OFF_OUTPUT
-      cluster_list:
-        - id: ON_OFF
-          attributes:
-            - attr_id: ON_OFF
-              value_ref: ha_heartbeat
+  id: my_zigbee
+  router: true
+  power_source: DC_SOURCE
 
 # ── Globals ───────────────────────────────────────────────────────────────────
 
@@ -135,6 +117,8 @@ switch:
     name: "Irrigation"
     icon: "mdi:sprinkler"
     restore_mode: RESTORE_DEFAULT_OFF
+    zigbee:
+      endpoint: 1
     on_turn_on:
       - globals.set:
           id: hours_since_watered
@@ -151,6 +135,8 @@ switch:
     id: ha_heartbeat
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
+    zigbee:
+      endpoint: 2
     on_turn_on:
       - globals.set:
           id: hours_no_heartbeat
