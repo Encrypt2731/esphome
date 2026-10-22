@@ -147,7 +147,7 @@ binary_sensor:
 #  Ring Chime button
 #
 #  Pressable from the HA UI or automations. Transmits the doorbell code 3 times
-#  with a 10ms gap between bursts — most 433MHz receivers need a few repeats
+#  with a 10ms gap between each burst — most 433MHz receivers need a few repeats
 #  before they act.
 #
 #  PHASE 2 — Replace "REPLACE_WITH_CAPTURED_CODE" with the same code and
@@ -157,11 +157,17 @@ button:
   - platform: template
     name: "Ring Chime"
     on_press:
-      - repeat:
-          count: 3       # Transmit 3 times for reliable delivery
-          then:
-            - remote_transmitter.transmit_rc_switch_raw:
-                transmitter_id: rf_tx
-                code: "000000000000000000000000"  # ← REPLACE with same code as binary_sensor
-                protocol: 1                       # ← REPLACE with same protocol as binary_sensor
-            - delay: 10ms  # Brief gap between each repeated burst
+      - remote_transmitter.transmit_rc_switch_raw:
+          transmitter_id: rf_tx
+          code: "000000000000000000000000"  # ← REPLACE with same code as binary_sensor
+          protocol: 1                       # ← REPLACE with same protocol as binary_sensor
+      - delay: 10ms
+      - remote_transmitter.transmit_rc_switch_raw:
+          transmitter_id: rf_tx
+          code: "000000000000000000000000"
+          protocol: 1
+      - delay: 10ms
+      - remote_transmitter.transmit_rc_switch_raw:
+          transmitter_id: rf_tx
+          code: "000000000000000000000000"
+          protocol: 1
