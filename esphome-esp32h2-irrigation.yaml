@@ -41,7 +41,6 @@ esphome:
   friendly_name: Irrigation Controller
 
 esp32:
-  board: esp32h2devkitm
   variant: esp32h2
   framework:
     type: esp-idf   # required for ESP32-H2; Arduino framework is not supported
@@ -124,7 +123,6 @@ switch:
     id: irrigation_relay
     icon: "mdi:sprinkler"
     restore_mode: RESTORE_DEFAULT_OFF
-    cluster: on_off
     lambda: return id(relay_gpio).state;
     turn_on_action:
       - switch.turn_on: relay_gpio
@@ -144,7 +142,6 @@ switch:
     id: ha_heartbeat
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
-    cluster: on_off
     on_turn_on:
       - globals.set:
           id: hours_no_heartbeat
