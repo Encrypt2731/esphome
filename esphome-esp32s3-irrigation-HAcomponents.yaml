@@ -1,0 +1,145 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Home Assistant — Irrigation Schedule & Countdown
+# Compatible with: HA 2023.x and later
+#
+# Prerequisites:
+#   1. An ESPHome "Irrigation Controller" device added to HA.
+#   2. A Schedule helper named "Irrigation Schedule"
+#      (Settings → Helpers → Create Helper → Schedule).
+#      Each block in the schedule triggers one irrigation session. The block
+#      length does not control duration — session length is set by the
+#      "Session Duration" number on the ESP32 device.
+#
+# Entity IDs (verify at Settings → Devices & Services → ESPHome):
+#   switch.irrigation_controller_irrigation
+#   number.irrigation_controller_session_duration
+#
+# Helpers required (Settings → Helpers → Create Helper, or add YAML below):
+#   timer.irrigation_countdown  — only helper still needed
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ── Helper ────────────────────────────────────────────────────────────────────
+
+timer:
+  irrigation_countdown:
+    name: "Irrigation Countdown"
+    icon: mdi:timer-outline
+    restore: false
+
+
+# ── Script ────────────────────────────────────────────────────────────────────
+# Optional — use for manual one-off sessions from the HA UI or other automations.
+# The countdown automation handles the timer regardless of how the switch is turned on.
+
+start_irrigation:
+  alias: "Start Irrigation"
+  icon: mdi:sprinkler
+  mode: single
+  max_exceeded: silent
+  sequence:
+    - condition: state
+      entity_id: switch.irrigation_controller_irrigation
+      state: "off"
+    - service: switch.turn_on
+      target:
+        entity_id: switch.irrigation_controller_irrigation
+
+
+# ── Automations ───────────────────────────────────────────────────────────────
+
+- alias: "Irrigation: Schedule block started"
+  id: irrigation_schedule_start
+  description: >
+    Turns the relay on when a scheduled block begins. Skipped if irrigation
+    is already running (e.g. a button-triggered ad hoc session is in progress).
+  trigger:
+    - platform: state
+      entity_id: schedule.irrigation_schedule
+      to: "on"
+  condition:
+    - condition: state
+      entity_id: switch.irrigation_controller_irrigation
+      state: "off"
+  action:
+    - service: switch.turn_on
+      target:
+        entity_id: switch.irrigation_controller_irrigation
+  mode: single
+
+
+- alias: "Irrigation: Schedule block ended"
+  id: irrigation_schedule_end
+  description: >
+    Safety net — turns the relay off when the scheduled block ends if the
+    session is still running (e.g. the block was longer than Session Duration).
+  trigger:
+    - platform: state
+      entity_id: schedule.irrigation_schedule
+      to: "off"
+  condition:
+    - condition: state
+      entity_id: switch.irrigation_controller_irrigation
+      state: "on"
+  action:
+    - service: switch.turn_off
+      target:
+        entity_id: switch.irrigation_controller_irrigation
+  mode: single
+
+
+- alias: "Irrigation: Start countdown"
+  id: irrigation_countdown_start
+  description: >
+    Starts the countdown timer whenever the relay turns on, regardless of
+    trigger source. Duration is always read from the ESP32's Session Duration
+    number entity (number.irrigation_controller_session_duration); defaults to
+    3 minutes if the device is temporarily unavailable.
+  trigger:
+    - platform: state
+      entity_id: switch.irrigation_controller_irrigation
+      to: "on"
+  action:
+    - service: timer.start
+      target:
+        entity_id: timer.irrigation_countdown
+      data:
+        duration: >
+          {{ (states('number.irrigation_controller_session_duration') | float(3) * 60) | int }}
+  mode: single
+
+
+- alias: "Irrigation: Duration elapsed"
+  id: irrigation_duration_elapsed
+  description: >
+    Turns the relay off when the countdown timer reaches zero. This is the
+    normal end-of-session path for all HA-triggered and button-triggered
+    sessions. The ESP32's 10-minute hard cap on the device acts as a final
+    backstop if this automation fails to fire.
+  trigger:
+    - platform: event
+      event_type: timer.finished
+      event_data:
+        entity_id: timer.irrigation_countdown
+  action:
+    - service: switch.turn_off
+      target:
+        entity_id: switch.irrigation_controller_irrigation
+  mode: single
+
+
+- alias: "Irrigation: Stop countdown"
+  id: irrigation_countdown_stop
+  description: >
+    Cancels the countdown timer whenever the relay turns off — whether stopped
+    by the duration elapsed automation, the schedule block ending, the ESP32
+    hard cap, or a manual turn-off.
+  trigger:
+    - platform: state
+      entity_id: switch.irrigation_controller_irrigation
+      to: "off"
+  action:
+    - service: timer.cancel
+      target:
+        entity_id: timer.irrigation_countdown
+  mode: single
