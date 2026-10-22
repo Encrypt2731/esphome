@@ -117,8 +117,7 @@ switch:
     name: "Irrigation"
     icon: "mdi:sprinkler"
     restore_mode: RESTORE_DEFAULT_OFF
-    zigbee_id: my_zigbee
-    endpoint: 1
+    cluster: on_off
     on_turn_on:
       - globals.set:
           id: hours_since_watered
@@ -135,8 +134,7 @@ switch:
     id: ha_heartbeat
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
-    zigbee_id: my_zigbee
-    endpoint: 2
+    cluster: on_off
     on_turn_on:
       - globals.set:
           id: hours_no_heartbeat
