@@ -122,17 +122,19 @@ script:
 # ── Switch ────────────────────────────────────────────────────────────────────
 
 switch:
-  # Irrigation relay — RESTORE_DEFAULT_OFF ensures the valve starts closed on
-  # every boot so a power cut cannot leave water running. on_turn_on resets the
-  # hours_since_watered counter (so the fallback interval restarts from zero)
-  # and arms the hard cap timer. on_turn_off cancels the timer cleanly whether
-  # the relay was closed by HA, the fallback script, or the hard cap itself.
+  # Irrigation relay — ALWAYS_OFF unconditionally initialises the GPIO to LOW
+  # on every boot, regardless of any state stored in NVS flash. This guarantees
+  # the valve cannot be energised by a power cut mid-session followed by a
+  # reboot. on_turn_on resets the hours_since_watered counter (so the fallback
+  # interval restarts from zero) and arms the hard cap timer. on_turn_off
+  # cancels the timer cleanly whether the relay was closed by HA, the fallback
+  # script, or the hard cap itself.
   - platform: gpio
     pin: GPIO2
     id: irrigation_relay
     name: "Irrigation"
     icon: "mdi:sprinkler"
-    restore_mode: RESTORE_DEFAULT_OFF
+    restore_mode: ALWAYS_OFF
     on_turn_on:
       - globals.set:
           id: hours_since_watered
