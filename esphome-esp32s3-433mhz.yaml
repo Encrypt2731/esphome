@@ -8,28 +8,58 @@
 #    3. Exposes a button in Home Assistant that, when pressed, transmits the
 #       same 433MHz RF code — causing your chime unit to ring on demand.
 #
-#  Hardware required:
-#    - ESP32-S3 development board (e.g. ESP32-S3-DevKitC-1)
-#      Note: ESP32-H2 has no WiFi; a WiFi-capable board is required.
-#    - SRX882 superheterodyne 433MHz receiver module  (DATA → GPIO4)
-#    - STX882 433MHz transmitter module               (DATA → GPIO5)
-#    - 17.3cm wire antenna soldered to each module's ANT pad
+#  ── Wiring ───────────────────────────────────────────────────────────────────
 #
-#  Connectivity:
-#    Connects to Home Assistant over WiFi using ESPHome's native API.
-#    Credentials live in secrets.yaml.
+#  Power both RF modules from the ESP32-S3's 3V3 pin. The SRX882 runs from
+#  2.7V–5.5V; at 3.3V its DATA output is 3.3V logic, directly safe for the
+#  ESP32-S3 GPIOs (which are not 5V tolerant). The STX882 runs from 1.8V–3.6V,
+#  so 3.3V is at the top of its rated range and needs no level shifting.
 #
-#  Setup phases:
-#    Phase 1 — Code discovery: uncomment "dump: rc_switch", flash the device,
-#              press your doorbell button while watching the serial log, and
-#              note the code and protocol values that repeat consistently.
-#    Phase 2 — Deployment: fill in your captured code in the two marked places
-#              below, re-comment "dump:", and reflash.
+#  ESP32-S3               (Seeed XIAO ESP32S3 label)
+#  ┌─────────────┐
+#  │         3V3 ├──────────────── VCC (SRX882)     (3V3 pin)
+#  │         3V3 ├──────────────── VCC (STX882)     (3V3 pin)
+#  │         GND ├──────────────── GND (SRX882)     (GND pin)
+#  │         GND ├──────────────── GND (STX882)     (GND pin)
+#  │       GPIO4 ├◄─────────────── DATA (SRX882)    (D3)
+#  │       GPIO5 ├──────────────►  DATA (STX882)    (D4)
+#  └─────────────┘
+#
+#  SRX882 (receiver):
+#    VCC  — 3V3              (XIAO: 3V3 pin)
+#    GND  — GND              (XIAO: GND pin)
+#    DATA — GPIO4  (D3)      (some modules have two DATA pins; both carry the
+#                             same signal, connect either one)
+#    ANT  — 17.3cm solid wire soldered to the ANT pad, held vertical
+#
+#  STX882 (transmitter):
+#    VCC  — 3V3              (XIAO: 3V3 pin)
+#    GND  — GND              (XIAO: GND pin)
+#    DATA — GPIO5  (D4)
+#    ANT  — 17.3cm solid wire soldered to the ANT pad, held vertical
+#
+#  Antenna:
+#    17.3cm is the quarter-wavelength for 433.92MHz (300,000,000 ÷ (4 × 433,920,000)).
+#    Keep the two antennas separated and vertical. Placing RX and TX antennas
+#    close together or parallel degrades both range and receive sensitivity.
+#
+#  ── Setup phases ─────────────────────────────────────────────────────────────
+#
+#  Phase 1 — Code discovery: uncomment "dump: rc_switch", flash the device,
+#            press your doorbell button while watching the serial log, and
+#            note the code and protocol values that repeat consistently.
+#  Phase 2 — Deployment: fill in your captured code in the marked places below,
+#            re-comment "dump:", and reflash.
+#
 # ════════════════════════════════════════════════════════════════════════════════
 
 
 # ──────────────────────────────────────────
 #  Core device identity
+#
+#  "name" is the internal ESPHome identifier used for OTA and mDNS
+#  (reachable at door-chime-rf.local on your network).
+#  "friendly_name" is what appears in Home Assistant's device registry.
 # ──────────────────────────────────────────
 esphome:
   name: door-chime-rf
@@ -39,8 +69,10 @@ esphome:
 # ──────────────────────────────────────────
 #  Hardware target
 #
-#  ESP32-S3 — WiFi + Bluetooth, Arduino framework.
-#  (ESP32-H2 is Zigbee/Thread/BLE only — no WiFi support.)
+#  Tells ESPHome which chip and framework to compile for.
+#  ESP32-S3 has WiFi + Bluetooth; the Arduino framework is used here because
+#  it has mature support for the remote_receiver/transmitter components.
+#  (The original ESP32-H2 is Zigbee/Thread/BLE only — no WiFi.)
 # ──────────────────────────────────────────
 esp32:
   variant: esp32s3
@@ -51,11 +83,13 @@ esp32:
 # ──────────────────────────────────────────
 #  Serial logging
 #
-#  The ESP32-S3's built-in USB port uses the USB Serial JTAG peripheral.
-#  Without this setting logs go to GPIO43/44 (UART0) and nothing appears
-#  over USB-C.
-#  DEBUG level shows every received RF packet — essential during Phase 1.
-#  Switch to INFO once codes are confirmed.
+#  The ESP32-S3's built-in USB-C port uses the USB Serial JTAG peripheral,
+#  not a traditional UART. Without hardware_uart: USB_SERIAL_JTAG, log output
+#  is sent to GPIO43/44 (UART0) and nothing appears over USB-C.
+#
+#  During Phase 1, DEBUG level causes every received RF packet to be printed
+#  to the serial log — this is how you discover your doorbell's code.
+#  Change to INFO once the code is confirmed to reduce noise.
 # ──────────────────────────────────────────
 logger:
   level: DEBUG  # Change to INFO after RF codes are confirmed
@@ -63,6 +97,23 @@ logger:
 
 
 # ── WiFi & Home Assistant API ─────────────────────────────────────────────────
+#
+#  wifi: connects to your home network using credentials from secrets.yaml.
+#
+#  wifi.ap: if the primary WiFi connection fails (wrong password, router
+#    rebooted, etc.), the device falls back to broadcasting its own access
+#    point named "door-chime-rf". Connect to it to reach the captive portal.
+#
+#  captive_portal: when connected to the fallback AP, a web page lets you
+#    update WiFi credentials without needing a USB cable or reflash.
+#
+#  api: the ESPHome native protocol that Home Assistant uses to communicate
+#    with the device. The encryption key prevents network sniffing; HA
+#    discovers the device automatically via mDNS once it is on the same network.
+#
+#  ota: allows reflashing the firmware over WiFi from the ESPHome dashboard
+#    or CLI. After the first USB flash, all future updates can be wireless.
+# ─────────────────────────────────────────────────────────────────────────────
 
 wifi:
   ssid: !secret wifi_ssid
@@ -85,17 +136,31 @@ ota:
 # ──────────────────────────────────────────
 #  433MHz Receiver  (SRX882 DATA pin → GPIO4)
 #
-#  tolerance: how much timing variation is accepted before a pulse is rejected.
-#    60% is generous — useful for cheap transmitters.
-#  filter: ignores pulses shorter than 250µs, rejecting electrical noise.
-#  idle: packet is considered complete if no pulse arrives within 4ms.
+#  remote_receiver monitors GPIO4 continuously in the background. When the
+#  SRX882 demodulates an incoming RF burst it pulses DATA high/low; the
+#  component times these pulses and tries to decode them using known protocols
+#  (RC Switch, NEC, etc.).
 #
-#  PHASE 1 — Code discovery:
-#    Uncomment "dump: rc_switch" below, flash and open the serial log.
-#    Press your doorbell button several times. Each press prints a line like:
+#  tolerance: maximum timing deviation before a pulse is rejected. 60% is
+#    generous — doorbell buttons use cheap crystal-less transmitters that
+#    drift significantly from the protocol spec.
+#
+#  filter: discards any pulse shorter than 250µs. Brief spikes from electrical
+#    noise or relay switching look like valid pulses to the receiver hardware;
+#    this setting prevents them from triggering false decodes.
+#
+#  idle: if no pulse arrives within 4ms, the component treats the current
+#    burst as complete and hands it to the decoder. 4ms is longer than the
+#    inter-symbol gap in every common 433MHz protocol but shorter than the
+#    gap between separate button transmissions.
+#
+#  dump: rc_switch (Phase 1 only):
+#    When uncommented, every successfully decoded RC Switch packet is printed
+#    to the serial log as:
 #      Received RCSwitch Raw: protocol=1 data="010110100101101001011010" (24 bits)
-#    The value that repeats consistently is your doorbell code.
-#    Re-comment "dump:" before your Phase 2 flash.
+#    Press the doorbell button several times and take the code that appears
+#    consistently. Re-comment this line before the Phase 2 flash — leaving it
+#    enabled fills the log with noise and can slow down the decoder.
 # ──────────────────────────────────────────
 remote_receiver:
   id: rf_rx
@@ -112,24 +177,45 @@ remote_receiver:
 # ──────────────────────────────────────────
 #  433MHz Transmitter  (STX882 DATA pin ← GPIO5)
 #
-#  carrier_duty_percent: 100% passes the raw data signal directly. RF modules
-#    generate their own carrier internally; no carrier wave baked in here.
+#  remote_transmitter drives GPIO5 with timed high/low pulses that encode the
+#  specified protocol and data. The STX882 uses OOK (On-Off Keying): it
+#  transmits the 433MHz carrier while DATA is high and goes silent when DATA
+#  is low, so the pulse pattern on GPIO5 becomes the RF signal directly.
+#
+#  carrier_duty_percent: 100% means the GPIO is driven at full logic level
+#  with no carrier frequency baked in. IR transmitters need a 38kHz carrier
+#  wave modulated onto the data signal; 433MHz OOK modules do not — they
+#  generate their own carrier internally.
 # ──────────────────────────────────────────
 remote_transmitter:
   id: rf_tx
   pin: GPIO5
-  carrier_duty_percent: 100%  # RF modules modulate internally — no carrier needed here
+  carrier_duty_percent: 100%  # RF modules use OOK — no software carrier needed
 
 
 # ──────────────────────────────────────────
 #  Doorbell binary sensor
 #
-#  Watches the remote_receiver for your doorbell button's RF code. When matched,
-#  the sensor switches on in Home Assistant for 3 seconds then resets — this
-#  debounces the signal (a single press fires 3–10 identical packets) and gives
-#  automations a clean trigger edge.
+#  This sensor subscribes to remote_receiver. Every decoded packet is compared
+#  against the rc_switch_raw spec (code + protocol). On a match, the sensor
+#  activates ("on") in Home Assistant, where it can trigger automations such
+#  as push notifications, lights, or camera recordings.
 #
-#  PHASE 2 — Replace "REPLACE_WITH_CAPTURED_CODE" with your actual code.
+#  rc_switch_raw matches the exact binary string and protocol number captured
+#  during Phase 1. Using the raw code (rather than rc_switch_type_a/b/c)
+#  avoids any ambiguity when doorbell codes do not map neatly onto a named
+#  RC Switch address/command format.
+#
+#  device_class: occupancy — displays the sensor as a presence/occupancy
+#  sensor in HA's UI. There is no dedicated "doorbell" device class; occupancy
+#  produces a sensible icon and state label.
+#
+#  delayed_off: 3s — a single button press typically fires 3–10 identical RF
+#  packets in quick succession (the transmitter keeps sending while the button
+#  is held). delayed_off collapses all of them into one clean "on" event that
+#  lasts 3 seconds, giving automations a stable, debounced trigger edge.
+#
+#  PHASE 2 — Replace the placeholder code and protocol with your captured values.
 # ──────────────────────────────────────────
 binary_sensor:
   - platform: remote_receiver
@@ -146,12 +232,19 @@ binary_sensor:
 # ──────────────────────────────────────────
 #  Ring Chime button
 #
-#  Pressable from the HA UI or automations. Transmits the doorbell code 3 times
-#  with a 10ms gap between each burst — most 433MHz receivers need a few repeats
-#  before they act.
+#  A software button exposed in Home Assistant — no physical GPIO. Pressing it
+#  in the HA UI or via an automation triggers on_press, which instructs the
+#  STX882 to transmit the doorbell's RF code.
 #
-#  PHASE 2 — Replace "REPLACE_WITH_CAPTURED_CODE" with the same code and
-#    protocol used in the binary_sensor section above.
+#  The code is sent three times with 10ms gaps between bursts. Physical doorbell
+#  buttons transmit continuously while held, so chime receivers are designed to
+#  act only after seeing several repetitions. A single burst can be missed if
+#  the receiver's AGC (automatic gain control) is still settling; three bursts
+#  reliably triggers every common 433MHz chime unit.
+#
+#  PHASE 2 — Replace the placeholder code and protocol with the same values
+#  used in the binary_sensor section above. All three transmit actions must
+#  carry the same code.
 # ──────────────────────────────────────────
 button:
   - platform: template
