@@ -159,7 +159,7 @@ button:
     on_press:
       - repeat:
           count: 3       # Transmit 3 times for reliable delivery
-          sequence:
+          then:
             - remote_transmitter.transmit_rc_switch_raw:
                 transmitter_id: rf_tx
                 code: "000000000000000000000000"  # ← REPLACE with same code as binary_sensor
