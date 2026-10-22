@@ -11,8 +11,8 @@
 #  Hardware required:
 #    - ESP32-S3 development board (e.g. ESP32-S3-DevKitC-1)
 #      Note: ESP32-H2 has no WiFi; a WiFi-capable board is required.
-#    - RXB6 superheterodyne 433MHz receiver module  (DATA → GPIO4)
-#    - FS1000A (XY-FST) 433MHz transmitter module   (DATA → GPIO5)
+#    - SRX882 superheterodyne 433MHz receiver module  (DATA → GPIO4)
+#    - STX882 433MHz transmitter module               (DATA → GPIO5)
 #    - 17.3cm wire antenna soldered to each module's ANT pad
 #
 #  Connectivity:
@@ -83,7 +83,7 @@ ota:
 
 
 # ──────────────────────────────────────────
-#  433MHz Receiver  (RXB6 DATA pin → GPIO4)
+#  433MHz Receiver  (SRX882 DATA pin → GPIO4)
 #
 #  tolerance: how much timing variation is accepted before a pulse is rejected.
 #    60% is generous — useful for cheap transmitters.
@@ -110,7 +110,7 @@ remote_receiver:
 
 
 # ──────────────────────────────────────────
-#  433MHz Transmitter  (FS1000A DATA pin ← GPIO5)
+#  433MHz Transmitter  (STX882 DATA pin ← GPIO5)
 #
 #  carrier_duty_percent: 100% passes the raw data signal directly. RF modules
 #    generate their own carrier internally; no carrier wave baked in here.
@@ -137,8 +137,8 @@ binary_sensor:
     name: "Doorbell"
     device_class: occupancy
     rc_switch_raw:
-      code: "REPLACE_WITH_CAPTURED_CODE"  # e.g. "010110100101101001011010"
-      protocol: 1                          # e.g. 1  (match what the log showed)
+      code: "000000000000000000000000"  # ← REPLACE with your Phase 1 captured code
+      protocol: 1                       # ← REPLACE with your Phase 1 protocol number
     filters:
       - delayed_off: 3s
 
@@ -162,6 +162,6 @@ button:
           sequence:
             - remote_transmitter.transmit_rc_switch_raw:
                 transmitter_id: rf_tx
-                code: "REPLACE_WITH_CAPTURED_CODE"  # Same code as binary_sensor
-                protocol: 1                          # Same protocol as binary_sensor
+                code: "000000000000000000000000"  # ← REPLACE with same code as binary_sensor
+                protocol: 1                       # ← REPLACE with same protocol as binary_sensor
             - delay: 10ms  # Brief gap between each repeated burst
