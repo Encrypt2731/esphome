@@ -2,32 +2,44 @@
 # ESPHome Irrigation Controller — ESP32-S3 (WiFi)
 #
 # Pinout:
-#   GPIO2 — Relay signal (wire to NO terminals on relay module; use a relay
-#            module or transistor driver — do not connect mains loads directly
-#            to the GPIO pin)
+#   GPIO2        — Relay signal → HL-52S relay module IN pin
+#                  The HL-52S uses an active-LOW trigger: GPIO HIGH = relay off,
+#                  GPIO LOW = relay energised. The pin is declared inverted so
+#                  that ESPHome's logical ON maps to GPIO LOW (coil energised)
+#                  and logical OFF maps to GPIO HIGH (coil de-energised, no
+#                  current draw). Wire the load to the NO terminals on the relay.
+#
+#   button_pin   — Momentary push button, wired between the GPIO and GND.
+#                  The internal pull-up holds the pin HIGH at rest; pressing
+#                  pulls it LOW. Configured inverted so "on" = pressed.
+#                  Change the button_pin substitution to match your board.
 #
 # Connectivity:
 #   Connects to Home Assistant over WiFi using ESPHome's native API.
 #   Credentials live in secrets.yaml — see the WiFi section below.
 #
 # Session behaviour:
-#   - HA controls duration and frequency during normal operation
+#   - A single "Session Duration" variable (number.irrigation_controller_session_duration)
+#     controls the length of every irrigation session regardless of trigger source
+#   - HA controls when sessions run during normal operation
+#   - The physical button triggers an ad hoc cycle using the same duration
 #   - If HA is unreachable for > 25 hours, a fallback schedule activates:
-#     two sessions per day (every 12 hours), each 3 minutes long
-#   - No single session can exceed 10 minutes regardless of trigger source
+#     two sessions per day (every 12 hours), each using the stored duration
+#   - No single session can exceed max_duration (10 min) regardless of source
 #
 # Fallback watchdog:
 #   Checks ESPHome API connectivity once per hour. If HA has been unreachable
 #   for heartbeat_timeout_h consecutive hours the fallback schedule activates
-#   automatically. No HA automation is required (unlike the Zigbee version).
+#   automatically. No HA automation is required.
 # ──────────────────────────────────────────────────────────────────────────────
 
 substitutions:
-  # Duration of each fallback irrigation session when HA is unreachable
-  fallback_duration: "3min"
+  # GPIO pin for the physical push button (wired to GND when pressed).
+  # Change this to a free GPIO on your board.
+  button_pin: "GPIO1"
 
-  # Absolute maximum duration for any single session, whether triggered by HA
-  # or the fallback schedule. Acts as a safety net against stuck-open valves.
+  # Absolute maximum duration for any single session, regardless of trigger
+  # source. Acts as a safety net against stuck-open valves.
   max_duration: "10min"
 
   # Hours of disconnection from HA before the fallback schedule activates
@@ -58,7 +70,7 @@ logger:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
-  
+
 api:
   encryption:
     key: !secret irrigation_encryption_key
@@ -87,13 +99,35 @@ globals:
     restore_value: no
     initial_value: '0'
 
+# ── Number ────────────────────────────────────────────────────────────────────
+
+number:
+  # Session duration — the single variable that governs all three trigger paths:
+  # HA-controlled sessions, button-triggered ad hoc cycles, and the automatic
+  # fallback schedule. Exposed to HA as:
+  #   number.irrigation_controller_session_duration
+  # restore_value persists the last HA-set value to NVS flash so the ESP32 reads
+  # the correct duration even when HA is offline or after a power cycle. Initial
+  # value of 3 minutes applies only on the very first boot before HA has ever
+  # connected.
+  - platform: template
+    name: "Session Duration"
+    id: session_duration_min
+    icon: "mdi:clock-outline"
+    unit_of_measurement: min
+    min_value: 1
+    max_value: 10
+    step: 0.5
+    optimistic: true
+    restore_value: true
+    initial_value: 3
+
 # ── Scripts ───────────────────────────────────────────────────────────────────
 
 script:
   # Hard cap — armed automatically whenever the relay turns on, cancelled when
-  # it turns off. Applies to both HA-triggered and fallback sessions.
-  # mode: restart means if the relay is turned off and on again mid-session,
-  # the 10-minute timer resets rather than carrying over from the previous run.
+  # it turns off. Applies to all session sources (HA, fallback, button).
+  # mode: restart resets the 10-minute timer if the relay is cycled mid-session.
   - id: max_duration_cap
     mode: restart
     then:
@@ -101,31 +135,62 @@ script:
       - switch.turn_off: irrigation_relay
       - logger.log: "Irrigation stopped by 10-min hard cap"
 
-  # Fallback session — runs for fallback_duration then stops. The max_duration_cap
-  # script is still active in parallel as a backstop in case this script hangs.
-  # mode: single prevents sessions stacking if the hourly interval fires while
-  # a session is already in progress.
+  # Fallback session — runs for session_duration_min then stops. max_duration_cap
+  # remains armed as a backstop. mode: single prevents stacking if the hourly
+  # watchdog fires while a session is already in progress.
   - id: fallback_irrigation
     mode: single
     then:
       - logger.log: "Fallback irrigation started"
       - switch.turn_on: irrigation_relay
-      - delay: $fallback_duration
+      - delay: !lambda |-
+          return (uint32_t)(id(session_duration_min).state * 60.0f * 1000.0f);
       - switch.turn_off: irrigation_relay
       - logger.log: "Fallback irrigation complete"
+
+  # Button-triggered ad hoc session.
+  # First press starts irrigation; a second press while running stops it early.
+  # Duration always reads from session_duration_min — persisted to NVS flash, so
+  # the correct value is available whether HA is online or offline.
+  # The max_duration_cap script is armed by on_turn_on and applies regardless.
+  # mode: restart allows a second button press to abort and restart the script,
+  # which then finds the relay ON and turns it off cleanly.
+  - id: button_irrigation
+    mode: restart
+    then:
+      - if:
+          condition:
+            switch.is_on: irrigation_relay
+          then:
+            - switch.turn_off: irrigation_relay
+            - logger.log: "Button: irrigation stopped"
+          else:
+            - logger.log: "Button: ad hoc irrigation started"
+            - switch.turn_on: irrigation_relay
+            - delay: !lambda |-
+                return (uint32_t)(id(session_duration_min).state * 60.0f * 1000.0f);
+            - switch.turn_off: irrigation_relay
+            - logger.log: "Button: ad hoc irrigation complete"
 
 # ── Switch ────────────────────────────────────────────────────────────────────
 
 switch:
-  # Irrigation relay — ALWAYS_OFF unconditionally initialises the GPIO to LOW
-  # on every boot, regardless of any state stored in NVS flash. This guarantees
-  # the valve cannot be energised by a power cut mid-session followed by a
-  # reboot. on_turn_on resets the hours_since_watered counter (so the fallback
-  # interval restarts from zero) and arms the hard cap timer. on_turn_off
-  # cancels the timer cleanly whether the relay was closed by HA, the fallback
-  # script, or the hard cap itself.
+  # Irrigation relay — GPIO2 is declared inverted to match the HL-52S
+  # active-LOW trigger: logical ON drives GPIO LOW (coil energised, water on),
+  # logical OFF drives GPIO HIGH (coil de-energised, no current draw).
+  #
+  # ALWAYS_OFF unconditionally initialises the GPIO to its logical-OFF state
+  # (physical HIGH) on every boot, regardless of any state stored in NVS flash.
+  # This guarantees the valve cannot be energised by a power cut mid-session
+  # followed by a reboot.
+  #
+  # on_turn_on resets the hours_since_watered counter and arms the hard cap
+  # timer. on_turn_off cancels the timer cleanly whether the relay was closed
+  # by HA, the fallback script, the button script, or the hard cap itself.
   - platform: gpio
-    pin: GPIO2
+    pin:
+      number: GPIO2
+      inverted: true
     id: irrigation_relay
     name: "Irrigation"
     icon: "mdi:sprinkler"
@@ -137,6 +202,27 @@ switch:
       - script.execute: max_duration_cap
     on_turn_off:
       - script.stop: max_duration_cap
+
+# ── Button ────────────────────────────────────────────────────────────────────
+
+binary_sensor:
+  # Physical push button — wired between button_pin and GND.
+  # inverted: true so the sensor reads ON when the pin is pulled LOW (pressed).
+  # delayed_on debounces the mechanical contact; 50 ms is sufficient for most
+  # tactile switches without making the button feel sluggish.
+  - platform: gpio
+    pin:
+      number: $button_pin
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    id: irrigation_button
+    name: "Irrigation Button"
+    filters:
+      - delayed_on: 50ms
+    on_press:
+      - script.execute: button_irrigation
 
 # ── Watchdog & fallback schedule ──────────────────────────────────────────────
 
