@@ -44,7 +44,7 @@
 # The ONLY way the relay coil can ever be energised is via an explicit
 # Home Assistant "turn on" command, and even then only for 300 ms.
 # Three independent layers enforce this:
-#   1. output.restore_value: false  — GPIO pin is always LOW on boot
+#   1. GPIO output default      — pin is always LOW on boot (no state restored)
 #   2. switch.restore_mode: ALWAYS_OFF — switch state is never stored
 #   3. on_boot automation — relay opens again before components start
 # ============================================================
@@ -132,9 +132,9 @@ ota:
 # Using a low-level 'output' component (rather than a switch directly)
 # gives us the most direct, unambiguous control over the GPIO pin.
 #
-# restore_value: false  ← critical safety setting.
-#   The pin is always initialised LOW on every boot.  The previous
-#   on/off state is deliberately never saved or restored.
+# The GPIO output component always initialises the pin LOW on boot.
+# No saved state is ever restored — the previous on/off value is
+# deliberately discarded on every restart.
 output:
   - platform: gpio
     id: relay_output
@@ -142,7 +142,6 @@ output:
       number: GPIO4        # ← CHANGE: relay IN pin on your board  (XIAO: D3)
       mode:
         output: true       # Standard push-pull output (not open-drain)
-    restore_value: false   # GPIO always starts LOW; relay always starts open
 
 
 # ============================================================
@@ -213,10 +212,9 @@ binary_sensor:
 #
 # --- Software layers (all three hold on reboot) --------------
 #
-# Layer 1 — output.restore_value: false
-#   The GPIO output component initialises the pin LOW as part of
-#   its own setup routine, before any other component runs.
-#   The previous on/off state is never read from flash/NVS.
+# Layer 1 — GPIO output default
+#   The GPIO output component always initialises the pin LOW.
+#   ESPHome does not save or restore GPIO output state across reboots.
 #
 # Layer 2 — switch.restore_mode: ALWAYS_OFF
 #   ESPHome never recalls a saved ON state for this switch.
