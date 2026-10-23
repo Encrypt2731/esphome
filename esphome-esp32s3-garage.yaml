@@ -139,9 +139,11 @@ output:
   - platform: gpio
     id: relay_output
     pin:
-      number: GPIO4        # ← CHANGE: relay IN pin on your board  (XIAO: D3)
+      number: GPIO4
       mode:
-        output: true       # Standard push-pull output (not open-drain)
+        output: true
+      # inverted: true      # ← add this for NPN transistor circuit
+
 
 
 # ============================================================
