@@ -168,7 +168,7 @@ switch:
     restore_mode: ALWAYS_OFF
     on_turn_on:
       then:
-        - delay: 300ms                    # Hard-coded 300 ms contact closure
+        - delay: 500ms                    # Hard-coded 300 ms contact closure
         - switch.turn_off: relay_switch   # Open relay + reset HA state to OFF
 
 
