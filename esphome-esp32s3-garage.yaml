@@ -112,16 +112,15 @@ wifi:
   power_save_mode: NONE
   reboot_timeout: 0min
 
-  ap:
-    ssid: "garage-door"
-    password: !secret fallback_ap_password
+#   ap:
+#     ssid: "garage-door"
+#     password: !secret fallback_ap_password
 
-captive_portal:
+# captive_portal:
 
 api:
   encryption:
-    key: !secret garage_encryption_key
-
+    key: !secret garage_door_controller__encryption_key
 ota:
   - platform: esphome
     password: !secret ota_password
