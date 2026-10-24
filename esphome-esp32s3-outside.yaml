@@ -267,7 +267,6 @@ script:
   # (mode: single). max_duration_cap is armed by irrigation_relay on_turn_on.
   - id: button_start_irrigation
     mode: single
-    max_exceeded: silent
     then:
       - if:
           condition:
