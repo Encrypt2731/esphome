@@ -1,0 +1,568 @@
+# ============================================================
+# ESPHome – ESP32-S3 (Seeed XIAO) Outside Controller
+# File: esphome-esp32s3-outside.yaml
+# ============================================================
+#
+# Combines three subsystems on a single XIAO ESP32-S3:
+#   1. Garage door  — momentary relay trigger + reed switch sensor
+#   2. 433 MHz RF   — doorbell receiver (SRX882) + chime transmitter (STX882)
+#   3. Irrigation   — relay valve (HL-52S) + physical start/stop buttons
+#                     + HA-scheduled, button, and offline fallback sessions
+#
+# ── Pin assignments (grouped by subsystem) ────────────────────────────
+#
+#   ── Garage door ───────────────────────────────────────────────────
+#   GPIO2  (D1) ← Reed / magnetic contact switch     (one leg to GND)
+#   GPIO4  (D3) → HL-52S IN2 (relay 2 — garage door) (active-LOW, shared module)
+#
+#   ── 433 MHz RF ────────────────────────────────────────────────────
+#   GPIO5  (D4) ← SRX882 DATA                        (receiver)
+#   GPIO6  (D5) → STX882 DATA                        (transmitter)
+#
+#   ── Irrigation ────────────────────────────────────────────────────
+#   GPIO7  (D8) → HL-52S IN1 (relay 1 — irrigation)  (active-LOW, inverted)
+#   GPIO8  (D9) ← Start button                       (one leg to GND)
+#   GPIO9  (D10)← Stop button                        (one leg to GND)
+#
+#   GPIO3 (D2) is a strapping pin on the ESP32-S3 and is intentionally
+#   left unconnected. ESP32-S3 strapping pins: GPIO0, GPIO3, GPIO45, GPIO46.
+#
+# ── Pin changes from source files ─────────────────────────────────────
+#
+#   esphome-esp32s3-garage.yaml   — no pin changes
+#     GPIO2 reed switch and GPIO4 relay are unchanged.
+#
+#   esphome-esp32s3-433mhz.yaml
+#     GPIO4 (RX) → moved to GPIO5 (D4)
+#       Reason: conflict with garage relay on GPIO4.
+#     GPIO6 (TX) — unchanged.
+#
+#   esphome-esp32s3-irrigation.yaml
+#     GPIO2 (relay) → moved to GPIO7 (D8)
+#       Reason: conflict with garage reed switch on GPIO2.
+#     GPIO1 (start button) → moved to GPIO8 (D9)
+#       Reason: grouped with stop button on the right-side pins.
+#     GPIO3 (stop button) → moved to GPIO9 (D10)
+#       Reason: GPIO3 is a strapping pin on the ESP32-S3.
+#
+# ── Wiring ────────────────────────────────────────────────────────────
+#
+#  XIAO ESP32-S3
+#  ┌──────────────┐
+#  │          3V3 ├──── VCC (SRX882)          │  3V3 or 5V rated
+#  │          3V3 ├──── VCC (STX882)          │  (see 433MHz notes)
+#  │           5V ├──── VCC (HL-52S module — relay 1: irrigation, relay 2: garage)
+#  │          GND ├──── GND (all modules, both buttons, reed switch)
+#  │        GPIO2 ├◄─── Reed switch COM        (D1)
+#  │        GPIO3 ├──── (strapping pin — leave unconnected) (D2)
+#  │        GPIO4 ├───► HL-52S IN2 (garage door relay)     (D3)
+#  │        GPIO5 ├◄─── SRX882 DATA            (D4)
+#  │        GPIO6 ├───► STX882 DATA            (D5)
+#  │        GPIO7 ├───► HL-52S IN1 (irrigation relay)      (D8)
+#  │        GPIO8 ├◄─── Start button COM       (D9)
+#  │        GPIO9 ├◄─── Stop button COM        (D10)
+#  └──────────────┘
+#
+#  SRX882 / STX882 antenna: 17.3 cm solid wire (quarter-wave at 433.92 MHz).
+#  Keep RX and TX antennas separated and vertical.
+#
+#  HL-52S module: powered from the 5V rail (USB VBUS). Both relay channels
+#  share the single VCC/GND connection on the module. Both channels are
+#  active-LOW; GPIO4 (relay 2, garage) and GPIO7 (relay 1, irrigation) are
+#  both declared inverted so logical ON → GPIO LOW (relay closes) and logical
+#  OFF → GPIO HIGH (relay open, no coil current).
+#
+# ── Garage safety design ──────────────────────────────────────────────
+#
+#  The garage relay (HL-52S relay 2) is wired to the opener's dry-contact
+#  terminals. The ONLY way it can energise is via an explicit HA "turn on",
+#  and even then only for 300 ms. Three independent layers enforce this:
+#    1. inverted: true + output.turn_off — GPIO4 is driven HIGH (relay open)
+#       before any other component initialises
+#    2. switch.restore_mode: ALWAYS_OFF — state is never stored in NVS
+#    3. on_boot: priority 600     — explicit output.turn_off drives pin HIGH
+#
+# ── Irrigation session sources ────────────────────────────────────────
+#
+#  HA scheduled — HA script reads Session Duration and manages the delay.
+#  Button       — Start button opens valve; stop button closes it.
+#  Fallback     — Fires after heartbeat_timeout_h hours without HA,
+#                 at most once every fallback_interval_h hours.
+#  Hard cap     — ESP32-local 10-minute backstop; always active while
+#                 the relay is on, regardless of trigger source.
+#
+# ── 433 MHz code capture (Phase 1) ───────────────────────────────────
+#
+#  To capture your doorbell's RF code: uncomment 'dump: rc_switch' in the
+#  remote_receiver block AND set 'level: DEBUG' in the logger block, then
+#  flash and press the doorbell button while watching the serial log.
+#  Note the code and protocol that repeat consistently, fill them in below,
+#  then revert both diagnostic settings before your production flash.
+#
+# ============================================================
+
+
+# ── Substitutions ─────────────────────────────────────────────────────────────
+substitutions:
+  # ── Garage door ───────────────────────────────────────────────────
+  garage_relay_pin:  "GPIO4"   # D3 → HL-52S IN2 (relay 2, active-LOW, inverted below)
+  garage_sensor_pin: "GPIO2"   # D1 ← reed switch
+
+  # ── 433 MHz RF ────────────────────────────────────────────────────
+  rf_rx_pin: "GPIO5"            # D4 ← SRX882 DATA
+  rf_tx_pin: "GPIO6"            # D5 → STX882 DATA
+
+  # ── Irrigation ────────────────────────────────────────────────────
+  irrigation_relay_pin: "GPIO7"  # D8  → HL-52S IN (active-LOW, inverted below)
+  button_start_pin:     "GPIO8"  # D9  ← start button (to GND)
+  button_stop_pin:      "GPIO9"  # D10 ← stop button (to GND)
+
+  # ── Irrigation behaviour tunables ─────────────────────────────────
+  max_duration:        "10min"  # Hard cap: maximum single session length
+  heartbeat_timeout_h: "25"     # Hours without HA before fallback activates
+  fallback_interval_h: "12"     # Minimum hours between fallback sessions
+
+
+# ── Core device identity ──────────────────────────────────────────────────────
+esphome:
+  name: outside-controller
+  friendly_name: Outside Controller
+  # De-energise the garage relay (HL-52S relay 2) as early as possible during
+  # boot. With inverted: true on the output pin, output.turn_off drives GPIO4
+  # HIGH → relay open. The irrigation relay uses switch.gpio with ALWAYS_OFF
+  # and does not need an explicit on_boot action — its GPIO is driven HIGH
+  # (coil off) by the switch platform's own setup routine.
+  on_boot:
+    priority: 600
+    then:
+      - output.turn_off: garage_relay_output
+
+
+# ── Hardware target ───────────────────────────────────────────────────────────
+esp32:
+  board: seeed_xiao_esp32s3
+  variant: esp32s3
+  framework:
+    type: arduino
+
+
+# ── Serial logging ────────────────────────────────────────────────────────────
+#
+#  hardware_uart: USB_SERIAL_JTAG is required for log output over the XIAO's
+#  USB-C port. Without it, logs go to GPIO43/44 (UART0) and nothing appears
+#  over USB-C.
+#
+#  [DIAGNOSTIC] To capture raw RF data, swap the two level lines below AND
+#  uncomment dump: rc_switch in the remote_receiver block. Revert both to
+#  return to normal operation.
+# ─────────────────────────────────────────────────────────────────────────────
+logger:
+  level: INFO          # Normal operation  — comment out to enable diagnostic
+  # level: DEBUG       # [DIAGNOSTIC]      — uncomment to enable diagnostic
+  hardware_uart: USB_SERIAL_JTAG
+
+
+# ── WiFi & Home Assistant API ─────────────────────────────────────────────────
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  output_power: 15dB
+  power_save_mode: NONE
+  reboot_timeout: 0min
+
+api:
+  encryption:
+    key: !secret outside_controller_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+
+# ── Globals ───────────────────────────────────────────────────────────────────
+globals:
+  # 433 MHz: true while the STX882 is actively transmitting. The doorbell
+  # binary sensor checks this flag and discards any received packet during
+  # transmission, preventing the SRX882 from hearing its own STX882 neighbour
+  # and triggering a spurious doorbell notification.
+  - id: is_transmitting
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  # Irrigation: consecutive hours the ESPHome API has been unreachable. Resets
+  # to 0 on reconnect. Not persisted — resets on reboot, giving HA time to
+  # reconnect before the fallback schedule activates.
+  - id: hours_no_heartbeat
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  # Irrigation: hours elapsed since the last watering (HA or fallback).
+  # Prevents the fallback from running more than once per fallback_interval_h.
+  # Not persisted — safe to reset on reboot; the fallback cannot trigger for
+  # at least heartbeat_timeout_h hours after boot regardless.
+  - id: hours_since_watered
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+
+# ── Number ────────────────────────────────────────────────────────────────────
+number:
+  # Session duration — governs all three irrigation trigger paths.
+  # Exposed to HA as: number.outside_controller_session_duration
+  #
+  #   HA scheduled — HA script reads this entity and manages the delay itself.
+  #   Button       — button_start_irrigation reads the value directly on the ESP32.
+  #   Fallback     — fallback_irrigation reads the value directly; works offline.
+  #
+  # restore_value: true persists the last value to NVS flash so the correct
+  # duration survives reboots and HA outages. initial_value: 3 applies only
+  # on the very first boot before HA has ever connected.
+  - platform: template
+    name: "Session Duration"
+    id: session_duration_min
+    icon: "mdi:clock-outline"
+    unit_of_measurement: min
+    min_value: 1
+    max_value: 10
+    step: 0.5
+    optimistic: true
+    restore_value: true
+    initial_value: 3
+
+
+# ── Scripts ───────────────────────────────────────────────────────────────────
+script:
+  # Hard cap — armed whenever the irrigation relay turns on, regardless of
+  # trigger source. Forces the relay off after max_duration if nothing else
+  # has done so. This is the ESP32-local backstop against a missed turn_off
+  # command (e.g. WiFi interruption at end of session).
+  # mode: restart resets the timer on relay recycle so the cap always reflects
+  # the current continuous on-time.
+  - id: max_duration_cap
+    mode: restart
+    then:
+      - delay: $max_duration
+      - switch.turn_off: irrigation_relay
+      - logger.log: "Irrigation stopped by 10-min hard cap"
+
+  # Fallback session — fires when HA has been unreachable for heartbeat_timeout_h
+  # hours. Reads session_duration_min from NVS so the duration matches whatever
+  # HA last configured, even during a prolonged outage.
+  # mode: single prevents sessions stacking if the hourly watchdog fires while
+  # a session is already running.
+  - id: fallback_irrigation
+    mode: single
+    then:
+      - logger.log: "Fallback irrigation started"
+      - switch.turn_on: irrigation_relay
+      - delay: !lambda |-
+          return (uint32_t)(id(session_duration_min).state * 60.0f * 1000.0f);
+      - switch.turn_off: irrigation_relay
+      - logger.log: "Fallback irrigation complete"
+
+  # Start button — begins an ad hoc session using session_duration_min from NVS.
+  # Pressing start while a session is already running is silently ignored
+  # (mode: single). max_duration_cap is armed by irrigation_relay on_turn_on.
+  - id: button_start_irrigation
+    mode: single
+    max_exceeded: silent
+    then:
+      - if:
+          condition:
+            switch.is_on: irrigation_relay
+          then:
+            - logger.log: "Button: start ignored — relay already on"
+          else:
+            - logger.log: "Button: ad hoc irrigation started"
+            - switch.turn_on: irrigation_relay
+            - delay: !lambda |-
+                return (uint32_t)(id(session_duration_min).state * 60.0f * 1000.0f);
+            - switch.turn_off: irrigation_relay
+            - logger.log: "Button: ad hoc irrigation complete"
+
+
+# ── 433 MHz Receiver ─────────────────────────────────────────────────────────
+#
+#  remote_receiver monitors rf_rx_pin continuously. When the SRX882 demodulates
+#  an incoming RF burst it pulses DATA; the component times these pulses and
+#  decodes them using known protocols (RC Switch, NEC, etc.).
+#
+#  tolerance: 60% — generous timing tolerance for cheap crystal-less doorbell
+#    transmitters that drift significantly from the protocol specification.
+#  filter: 250µs — discards pulses shorter than 250µs (electrical noise spikes).
+#  idle: 4ms — treats a 4ms gap as end-of-burst; longer than any inter-symbol
+#    gap in common 433MHz protocols but shorter than the gap between presses.
+#
+#  [DIAGNOSTIC] dump: rc_switch — uncomment to log raw RC Switch packets to
+#    serial during Phase 1 code capture. Also set level: DEBUG above.
+# ─────────────────────────────────────────────────────────────────────────────
+remote_receiver:
+  id: rf_rx
+  pin:
+    number: $rf_rx_pin
+    mode:
+      input: true
+  # dump: rc_switch    # [DIAGNOSTIC] — uncomment to log raw RF packets
+  tolerance: 60%
+  filter: 250us
+  idle: 4ms
+
+
+# ── 433 MHz Transmitter ───────────────────────────────────────────────────────
+#
+#  remote_transmitter drives rf_tx_pin with timed pulses encoding the RC Switch
+#  protocol and data. carrier_duty_percent: 100% because 433MHz OOK modules
+#  generate their own carrier internally — no software carrier wave is needed.
+# ─────────────────────────────────────────────────────────────────────────────
+remote_transmitter:
+  id: rf_tx
+  pin: $rf_tx_pin
+  carrier_duty_percent: 100%
+
+
+# ── Output ────────────────────────────────────────────────────────────────────
+#
+#  A low-level output component is used for the garage relay (HL-52S relay 2)
+#  to give direct, unambiguous control over the GPIO pin — paired with
+#  switch.output below. inverted: true matches the HL-52S active-LOW trigger:
+#  logical OFF → GPIO HIGH (relay open); logical ON → GPIO LOW (relay closed).
+# ─────────────────────────────────────────────────────────────────────────────
+output:
+  - platform: gpio
+    id: garage_relay_output
+    pin:
+      number: $garage_relay_pin
+      mode:
+        output: true
+      inverted: true      # HL-52S is active-LOW: logical OFF → GPIO HIGH → relay open
+
+
+# ── Switches ──────────────────────────────────────────────────────────────────
+switch:
+  # ── Garage door trigger (HL-52S relay 2) ────────────────────────────────
+  # Momentary 300 ms pulse: HA issues "turn on" → relay closes → reopens.
+  # inverted: true is set on the output pin; logical OFF → GPIO HIGH → relay open.
+  # restore_mode: ALWAYS_OFF guarantees the relay is open on every boot.
+  # The self-reset prevents HA from holding the relay closed indefinitely.
+  - platform: output
+    name: "Garage Door Trigger"
+    id: garage_relay_switch
+    output: garage_relay_output
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      then:
+        - delay: 300ms
+        - switch.turn_off: garage_relay_switch
+
+  # ── Irrigation relay (HL-52S) ────────────────────────────────────────────
+  # The HL-52S is active-LOW: inverted: true maps logical ON → GPIO LOW
+  # (coil energised, valve open) and logical OFF → GPIO HIGH (coil off).
+  # restore_mode: ALWAYS_OFF initialises the GPIO to logical OFF (physical HIGH)
+  # on every boot, preventing the valve from opening after a power cut
+  # mid-session followed by a reboot.
+  # on_turn_on arms max_duration_cap for every trigger source (HA, button,
+  # fallback). on_turn_off cancels it cleanly regardless of which path closes
+  # the valve.
+  - platform: gpio
+    pin:
+      number: $irrigation_relay_pin
+      inverted: true
+    id: irrigation_relay
+    name: "Irrigation"
+    icon: "mdi:sprinkler"
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - globals.set:
+          id: hours_since_watered
+          value: '0'
+      - script.execute: max_duration_cap
+    on_turn_off:
+      - script.stop: max_duration_cap
+
+
+# ── Binary sensors ────────────────────────────────────────────────────────────
+binary_sensor:
+  # ── Garage door reed switch ──────────────────────────────────────────────
+  # NO reed switch wired between garage_sensor_pin and GND, internal pull-up.
+  #   Door CLOSED: magnet present → contacts close → GPIO pulled LOW
+  #                → inverted: true → ESPHome/HA reports "Closed"
+  #   Door OPEN:   magnet absent  → contacts open  → GPIO HIGH (via pull-up)
+  #                → inverted: true → ESPHome/HA reports "Open"
+  # If your sensor is NC type, remove 'inverted: true' — no other change needed.
+  - platform: gpio
+    name: "Garage Door"
+    id: door_sensor
+    pin:
+      number: $garage_sensor_pin
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    device_class: garage_door
+    filters:
+      - delayed_on_off: 50ms   # Debounce: ignore transitions shorter than 50 ms
+
+  # ── 433 MHz doorbell ─────────────────────────────────────────────────────
+  # Matches packets decoded from remote_receiver against the rc_switch_raw spec
+  # (code + protocol captured during Phase 1). On a match the sensor activates
+  # in Home Assistant, triggering any automations bound to it.
+  # A single button press fires 3–10 identical packets; delayed_off: 3s
+  # collapses them into one clean "on" event lasting 3 seconds.
+  # The is_transmitting lambda discards packets received while the STX882 is
+  # transmitting, preventing the chime button from triggering the doorbell sensor.
+  - platform: remote_receiver
+    id: doorbell_button
+    name: "Doorbell"
+    device_class: occupancy
+    rc_switch_raw:
+      code: "110001111110"     # ← CHANGE: code captured during Phase 1
+      protocol: 3              # ← CHANGE: protocol captured during Phase 1
+    filters:
+      - lambda: 'if (id(is_transmitting)) return {};  return x;'
+      - delayed_off: 3s
+
+  # ── Irrigation start button ──────────────────────────────────────────────
+  # Momentary push wired between button_start_pin and GND. Internal pull-up
+  # holds the pin HIGH at rest; pressing pulls it LOW. inverted: true maps
+  # pressed → logical ON. Ignored if the relay is already running.
+  - platform: gpio
+    pin:
+      number: $button_start_pin
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    id: irrigation_start_button
+    name: "Irrigation Start"
+    filters:
+      - delayed_on: 50ms
+    on_press:
+      - script.execute: button_start_irrigation
+
+  # ── Irrigation stop button ───────────────────────────────────────────────
+  # Identical wiring to the start button. Stops the valve immediately
+  # regardless of what started the session. Also cancels button_start_irrigation
+  # if its delay is still running, so the script exits cleanly.
+  - platform: gpio
+    pin:
+      number: $button_stop_pin
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    id: irrigation_stop_button
+    name: "Irrigation Stop"
+    filters:
+      - delayed_on: 50ms
+    on_press:
+      - script.stop: button_start_irrigation
+      - switch.turn_off: irrigation_relay
+      - logger.log: "Button: irrigation stopped"
+
+
+# ── Button ────────────────────────────────────────────────────────────────────
+button:
+  # ── Ring Chime ───────────────────────────────────────────────────────────
+  # Software button exposed in Home Assistant — no physical GPIO. Pressing it
+  # in the HA UI or via an automation instructs the STX882 to transmit the
+  # chime's RF code 98 times with no gap (~840 ms total), enough for the chime
+  # receiver to latch reliably.
+  # is_transmitting is set true for the duration so the SRX882 listener does
+  # not treat its own transmission as an incoming doorbell press.
+  - platform: template
+    name: "Ring Chime"
+    on_press:
+      - logger.log:
+          level: INFO
+          format: "Ring Chime command received — transmitting RF code"
+      - globals.set:
+          id: is_transmitting
+          value: 'true'
+      - remote_transmitter.transmit_rc_switch_raw:
+          code: "110001111110"     # ← CHANGE: match doorbell_button code above
+          protocol: 3              # ← CHANGE: match doorbell_button protocol above
+          repeat:
+            times: 98
+            wait_time: 0ms
+      - globals.set:
+          id: is_transmitting
+          value: 'false'
+
+
+# ── Interval — irrigation watchdog & fallback schedule ───────────────────────
+#
+#  Fires once per hour. Increments hours_since_watered each tick.
+#  Resets hours_no_heartbeat to 0 when the API is connected; increments it
+#  when disconnected. Triggers a fallback session when all three conditions hold:
+#    • API has been unreachable for heartbeat_timeout_h consecutive hours
+#    • At least fallback_interval_h hours have elapsed since last watering
+#    • The irrigation relay is not currently on
+# ─────────────────────────────────────────────────────────────────────────────
+interval:
+  - interval: 1h
+    then:
+      - lambda: 'id(hours_since_watered) += 1;'
+      - if:
+          condition:
+            api.connected:
+          then:
+            - lambda: 'id(hours_no_heartbeat) = 0;'
+          else:
+            - lambda: 'id(hours_no_heartbeat) += 1;'
+      - if:
+          condition:
+            lambda: |-
+              return id(hours_no_heartbeat) >= $heartbeat_timeout_h
+                  && id(hours_since_watered) >= $fallback_interval_h
+                  && !id(irrigation_relay).state;
+          then:
+            - script.execute: fallback_irrigation
+
+
+# ============================================================
+# GARAGE RELAY SAFETY ANALYSIS
+# ============================================================
+#
+# The garage relay uses HL-52S relay 2 (active-LOW), the same module
+# as the irrigation relay. Both channels share the module's VCC/GND.
+#
+# --- Software layers (all three hold on every reboot) --------
+#
+# Layer 1 — inverted: true + output.turn_off
+#   With inverted: true, output.turn_off drives GPIO4 HIGH.
+#   GPIO HIGH → no LED current → relay open. The output component
+#   initialises in this state; on_boot reinforces it immediately.
+#
+# Layer 2 — switch.restore_mode: ALWAYS_OFF
+#   ESPHome never recalls a saved ON state. The garage switch always
+#   starts in the OFF (relay open) state on every boot.
+#
+# Layer 3 — on_boot: priority: 600
+#   output.turn_off: garage_relay_output fires very early in the boot
+#   sequence, driving GPIO4 HIGH before any other component initialises.
+#
+# All three layers operate before WiFi or the HA API initialises,
+# so no incoming command can race against them during startup.
+#
+# --- The hardware window (power-on risk) ---------------------
+#
+# Between power application and firmware configuring the GPIO as a
+# driven output, there is a window of tens of milliseconds where the
+# pin is in its hardware reset state (high-impedance input).
+#
+# For an active-LOW relay (HL-52S), the IN pin circuit is:
+#   VCC(5V) → R(1kΩ) → opto LED → IN pin
+# When IN is floating (high-Z), there is no return path for LED
+# current — the LED cannot conduct and the relay stays open.
+# The active-LOW design is therefore inherently safe during the
+# power-on window without any external pull resistor.
+#
+# GPIO4 (D3) is not a strapping pin on the ESP32-S3, so it carries
+# no internal pull-down that could briefly drive IN LOW and trigger
+# the relay. (Strapping pins to avoid: GPIO0, GPIO3, GPIO45, GPIO46.)
+#
+# No external resistor is required for either relay channel.
+# ============================================================
