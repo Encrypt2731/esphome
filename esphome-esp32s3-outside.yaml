@@ -353,9 +353,8 @@ switch:
     output: garage_relay_output
     restore_mode: ALWAYS_OFF
     on_turn_on:
-      then:
-        - delay: 300ms
-        - switch.turn_off: garage_relay_switch
+      - delay: 300ms
+      - switch.turn_off: garage_relay_switch
 
   # ── Irrigation relay (HL-52S) ────────────────────────────────────────────
   # The HL-52S is active-LOW: inverted: true maps logical ON → GPIO LOW
