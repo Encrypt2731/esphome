@@ -258,8 +258,7 @@ script:
     then:
       - logger.log: "Fallback irrigation started"
       - switch.turn_on: irrigation_relay
-      - delay: !lambda |-
-          return (uint32_t)(id(session_duration_min).state * 60.0f * 1000.0f);
+      - delay: !lambda 'return (uint32_t)(id(session_duration_min).state * 60.0f * 1000.0f);'
       - switch.turn_off: irrigation_relay
       - logger.log: "Fallback irrigation complete"
 
@@ -278,8 +277,7 @@ script:
           else:
             - logger.log: "Button: ad hoc irrigation started"
             - switch.turn_on: irrigation_relay
-            - delay: !lambda |-
-                return (uint32_t)(id(session_duration_min).state * 60.0f * 1000.0f);
+            - delay: !lambda 'return (uint32_t)(id(session_duration_min).state * 60.0f * 1000.0f);'
             - switch.turn_off: irrigation_relay
             - logger.log: "Button: ad hoc irrigation complete"
 
@@ -507,10 +505,7 @@ interval:
             - lambda: 'id(hours_no_heartbeat) += 1;'
       - if:
           condition:
-            lambda: |-
-              return id(hours_no_heartbeat) >= $heartbeat_timeout_h
-                  && id(hours_since_watered) >= $fallback_interval_h
-                  && !id(irrigation_relay).state;
+            lambda: 'return id(hours_no_heartbeat) >= $heartbeat_timeout_h && id(hours_since_watered) >= $fallback_interval_h && !id(irrigation_relay).state;'
           then:
             - script.execute: fallback_irrigation
 
