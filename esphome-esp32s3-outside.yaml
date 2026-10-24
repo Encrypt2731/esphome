@@ -375,9 +375,7 @@ switch:
     icon: "mdi:sprinkler"
     restore_mode: ALWAYS_OFF
     on_turn_on:
-      - globals.set:
-          id: hours_since_watered
-          value: '0'
+      - lambda: 'id(hours_since_watered) = 0;'
       - script.execute: max_duration_cap
     on_turn_off:
       - script.stop: max_duration_cap
@@ -478,18 +476,14 @@ button:
       - logger.log:
           level: INFO
           format: "Ring Chime command received — transmitting RF code"
-      - globals.set:
-          id: is_transmitting
-          value: 'true'
+      - lambda: 'id(is_transmitting) = true;'
       - remote_transmitter.transmit_rc_switch_raw:
           code: "110001111110"     # ← CHANGE: match doorbell_button code above
           protocol: 3              # ← CHANGE: match doorbell_button protocol above
           repeat:
             times: 98
             wait_time: 0ms
-      - globals.set:
-          id: is_transmitting
-          value: 'false'
+      - lambda: 'id(is_transmitting) = false;'
 
 
 # ── Interval — irrigation watchdog & fallback schedule ───────────────────────
