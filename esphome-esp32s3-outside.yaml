@@ -231,6 +231,8 @@ number:
     optimistic: true
     restore_value: true
     initial_value: 3
+    set_action:
+      - lambda: 'id(session_duration_min).publish_state(x);'
 
 
 # ── Scripts ───────────────────────────────────────────────────────────────────
@@ -263,8 +265,8 @@ script:
       - logger.log: "Fallback irrigation complete"
 
   # Start button — begins an ad hoc session using session_duration_min from NVS.
-  # Pressing start while a session is already running is silently ignored
-  # (mode: single). max_duration_cap is armed by irrigation_relay on_turn_on.
+  # Pressing start while a session is already running is ignored (mode: single).
+  # max_duration_cap is armed by irrigation_relay on_turn_on.
   - id: button_start_irrigation
     mode: single
     then:
@@ -462,8 +464,8 @@ button:
   # ── Ring Chime ───────────────────────────────────────────────────────────
   # Software button exposed in Home Assistant — no physical GPIO. Pressing it
   # in the HA UI or via an automation instructs the STX882 to transmit the
-  # chime's RF code 98 times with no gap (~840 ms total), enough for the chime
-  # receiver to latch reliably.
+  # chime's RF code 98 times back-to-back (no inter-burst gap), enough for the
+  # chime receiver to latch reliably.
   # is_transmitting is set true for the duration so the SRX882 listener does
   # not treat its own transmission as an incoming doorbell press.
   - platform: template
