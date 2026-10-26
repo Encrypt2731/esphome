@@ -23,6 +23,8 @@
 #   GPIO7  (D8) → HL-52S IN1 (relay 1 — irrigation)  (active-LOW, inverted)
 #   GPIO8  (D9) ← Start button                       (one leg to GND)
 #   GPIO9  (D10)← Stop button                        (one leg to GND)
+#   GPIO1  (D0) ← Auto irrigation enable/disable toggle (one leg to GND)
+#                 open = auto enabled; closed = auto disabled
 #
 #   GPIO3 (D2) is a strapping pin on the ESP32-S3 and is intentionally
 #   left unconnected. ESP32-S3 strapping pins: GPIO0, GPIO3, GPIO45, GPIO46.
@@ -42,6 +44,7 @@
 #       Reason: conflict with garage reed switch on GPIO2.
 #     GPIO1 (start button) → moved to GPIO8 (D9)
 #       Reason: grouped with stop button on the right-side pins.
+#               GPIO1 (D0) is now used for the auto irrigation enable/disable toggle.
 #     GPIO3 (stop button) → moved to GPIO9 (D10)
 #       Reason: GPIO3 is a strapping pin on the ESP32-S3.
 #
@@ -61,6 +64,7 @@
 #  │        GPIO7 ├───► HL-52S IN1 (irrigation relay)      (D8)
 #  │        GPIO8 ├◄─── Start button COM       (D9)
 #  │        GPIO9 ├◄─── Stop button COM        (D10)
+#  │        GPIO1 ├◄─── Auto irrigation toggle (D0)
 #  └──────────────┘
 #
 #  SRX882 / STX882 antenna: 17.3 cm solid wire (quarter-wave at 433.92 MHz).
@@ -91,6 +95,17 @@
 #  Hard cap     — ESP32-local 10-minute backstop; always active while
 #                 the relay is on, regardless of trigger source.
 #
+# ── Irrigation automation controls ───────────────────────────────────
+#
+#  Physical toggle (D0) — disables BOTH fallback and HA-scheduled cycles
+#                          when closed (switch to GND). Manual irrigation
+#                          (physical button and HA Run Now) is always available.
+#  HA Skip Today switch  — disables HA-scheduled cycles for the rest of the
+#                          current day only; resets at midnight. Does not
+#                          affect fallback (HA is unreachable when fallback runs).
+#  Rain forecast rule    — sets Skip Today automatically when today's rain
+#                          forecast exceeds 10 mm.
+#
 # ── 433 MHz code capture (Phase 1) ───────────────────────────────────
 #
 #  To capture your doorbell's RF code: uncomment 'dump: rc_switch' in the
@@ -116,6 +131,7 @@ substitutions:
   irrigation_relay_pin: "GPIO7"  # D8  → HL-52S IN (active-LOW, inverted below)
   button_start_pin:     "GPIO8"  # D9  ← start button (to GND)
   button_stop_pin:      "GPIO9"  # D10 ← stop button (to GND)
+  auto_disable_pin:     "GPIO1"  # D0  ← auto irrigation enable/disable toggle (to GND)
 
   # ── Irrigation behaviour tunables ─────────────────────────────────
   max_duration:        "10min"  # Hard cap: maximum single session length
@@ -255,14 +271,21 @@ script:
   # HA last configured, even during a prolonged outage.
   # mode: single prevents sessions stacking if the hourly watchdog fires while
   # a session is already running.
+  # Skipped when the physical auto-disable toggle is closed (auto_irrigation_enabled OFF).
   - id: fallback_irrigation
     mode: single
     then:
-      - logger.log: "Fallback irrigation started"
-      - switch.turn_on: irrigation_relay
-      - delay: !lambda 'return (uint32_t)(id(session_duration_min).state * 60.0f * 1000.0f);'
-      - switch.turn_off: irrigation_relay
-      - logger.log: "Fallback irrigation complete"
+      - if:
+          condition:
+            binary_sensor.is_on: auto_irrigation_enabled
+          then:
+            - logger.log: "Fallback irrigation started"
+            - switch.turn_on: irrigation_relay
+            - delay: !lambda 'return (uint32_t)(id(session_duration_min).state * 60.0f * 1000.0f);'
+            - switch.turn_off: irrigation_relay
+            - logger.log: "Fallback irrigation complete"
+          else:
+            - logger.log: "Fallback irrigation skipped — auto irrigation disabled by physical toggle"
 
   # Start button — begins an ad hoc session using session_duration_min from NVS.
   # Pressing start while a session is already running is ignored (mode: single).
@@ -457,6 +480,25 @@ binary_sensor:
       - script.stop: button_start_irrigation
       - switch.turn_off: irrigation_relay
       - logger.log: "Button: irrigation stopped"
+
+  # ── Auto irrigation enable/disable toggle ────────────────────────────────
+  # Physical latching toggle wired between auto_disable_pin (D0) and GND.
+  # Internal pull-up ensures the safe default is ENABLED (switch open).
+  #   Switch OPEN  → GPIO HIGH (pull-up) → ON  = auto irrigation enabled
+  #   Switch CLOSED → GPIO LOW           → OFF = auto irrigation disabled
+  # Blocks fallback_irrigation on the ESP32 and blocks HA-scheduled cycles
+  # via a condition in the Irrigation Schedule automation.
+  # Manual irrigation (physical button or HA Run Now) is never affected.
+  - platform: gpio
+    name: "Auto Irrigation"
+    id: auto_irrigation_enabled
+    pin:
+      number: $auto_disable_pin
+      mode:
+        input: true
+        pullup: true
+    filters:
+      - delayed_on_off: 50ms
 
 
 # ── Button ────────────────────────────────────────────────────────────────────
