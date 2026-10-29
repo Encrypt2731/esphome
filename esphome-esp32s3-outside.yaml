@@ -434,6 +434,7 @@ switch:
       - lambda: |-
           id(hours_since_watered) = 0;
           id(irrigation_was_active) = true;
+          id(irrigation_interrupted_flag) = false;
       - script.execute: max_duration_cap
     on_turn_off:
       - script.stop: max_duration_cap
