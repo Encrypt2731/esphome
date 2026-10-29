@@ -1,0 +1,197 @@
+# ============================================================
+# Home Assistant – Outside Controller Package
+# Companion to esphome-esp32s3-outside.yaml (outside-controller)
+# ============================================================
+#
+# Covers all helpers and automations for the irrigation subsystem.
+# Garage door and doorbell require no HA helpers or automations.
+#
+# ── Usage ─────────────────────────────────────────────────────────────
+#
+#   Place this file at:  config/packages/outside_controller.yaml
+#   Add to configuration.yaml:
+#     homeassistant:
+#       packages:
+#         outside_controller: !include packages/outside_controller.yaml
+#
+#   If these automations already exist in your HA UI, delete them
+#   before activating this package to avoid duplicates.
+#
+# ── ESPHome entities referenced (not defined here) ────────────────────
+#
+#   switch.outside_controller_irrigation          — irrigation relay
+#   number.outside_controller_session_duration    — session length (min)
+#   binary_sensor.outside_controller_auto_irrigation  — physical toggle
+#   binary_sensor.outside_controller_irrigation_interrupted — power outage flag
+#   button.outside_controller_clear_irrigation_interrupted  — clear flag
+#
+# ── Schedule helper (UI only) ─────────────────────────────────────────
+#
+#   schedule.irrigation_schedule must be created manually:
+#     Settings → Helpers → Add Helper → Schedule
+#   Set your desired watering days and time there.
+#
+# ============================================================
+
+
+# ── Input booleans ────────────────────────────────────────────────────────────
+input_boolean:
+
+  # Manually skip today's scheduled irrigation.
+  # Set automatically by the rain forecast automation.
+  # Resets at midnight.
+  skip_irrigation_today:
+    name: "Skip Irrigation Today"
+    icon: mdi:calendar-remove
+
+  # Set alongside skip_irrigation_today when the skip was triggered by
+  # a rain forecast. Drives the distinct "🌧️" banner on the dashboard.
+  # Cleared at midnight alongside skip_irrigation_today.
+  irrigation_cancelled_rain:
+    name: "Irrigation Cancelled (Rain)"
+    icon: mdi:weather-rainy
+
+
+# ── Timers ────────────────────────────────────────────────────────────────────
+timer:
+
+  # Mirrors the active irrigation session duration in HA so the dashboard
+  # can show remaining time. Started and cancelled by the Timer Start/Cancel
+  # automations below.
+  irrigation_countdown:
+    name: "Irrigation Countdown"
+    icon: mdi:timer-outline
+    restore: true
+
+
+# ── Automations ───────────────────────────────────────────────────────────────
+automation:
+
+  # ── Irrigation Timer Cancel ─────────────────────────────────────────────
+  # Cancels the countdown whenever the valve closes, regardless of what
+  # closed it (HA, button, hard cap, stop button).
+  - id: irrigation_timer_cancel
+    alias: "Irrigation Timer Cancel"
+    description: "Stop countdown whenever the valve closes"
+    triggers:
+      - trigger: state
+        entity_id: switch.outside_controller_irrigation
+        to: 'off'
+    actions:
+      - action: timer.cancel
+        target:
+          entity_id: timer.irrigation_countdown
+    mode: single
+
+  # ── Irrigation Timer Start ──────────────────────────────────────────────
+  # Starts the countdown whenever the valve opens, regardless of trigger
+  # source. Duration is read from number.outside_controller_session_duration
+  # at the moment the relay closes, so mid-session duration changes are not
+  # reflected — consistent with how the ESP32 hard cap works.
+  - id: irrigation_timer_start
+    alias: "Irrigation Timer Start"
+    description: "Start countdown whenever the valve opens, regardless of trigger source"
+    triggers:
+      - trigger: state
+        entity_id: switch.outside_controller_irrigation
+        to: 'on'
+    actions:
+      - action: timer.start
+        target:
+          entity_id: timer.irrigation_countdown
+        data:
+          duration: >-
+            {{ (states('number.outside_controller_session_duration') | float(3)) *
+            60 | round | int }}
+    mode: single
+
+  # ── Irrigation: Duration elapsed ────────────────────────────────────────
+  # Turns the relay off when the countdown timer expires naturally. Covers
+  # manual switch toggles from the HA UI where no script is managing the
+  # session. Has no effect during scripted sessions — the script turns off
+  # the relay first, which cancels the timer before it can expire.
+  - id: irrigation_duration_elapsed
+    alias: "Irrigation: Duration elapsed"
+    description: >
+      Turns the relay off when the countdown timer expires naturally.
+      Covers manual HA UI toggles not managed by a script.
+    triggers:
+      - trigger: state
+        entity_id: timer.irrigation_countdown
+        from: active
+        to: idle
+    actions:
+      - action: switch.turn_off
+        target:
+          entity_id: switch.outside_controller_irrigation
+    mode: single
+
+  # ── Irrigation: Schedule block started ─────────────────────────────────
+  # Fires when the schedule helper enters an active block. Turns on the
+  # relay directly (script.start_irrigation is kept disabled as a placeholder
+  # for future scripted session management).
+  # Conditions: relay must be off, physical toggle must be enabled, and
+  # neither skip flag must be set.
+  - id: irrigation_schedule_block_started
+    alias: "Irrigation: Schedule block started"
+    description: "Turns relay on when a scheduled block begins"
+    triggers:
+      - trigger: state
+        entity_id: schedule.irrigation_schedule
+        to: 'on'
+    conditions:
+      - condition: state
+        entity_id: switch.outside_controller_irrigation
+        state: 'off'
+      - condition: state
+        entity_id: binary_sensor.outside_controller_auto_irrigation
+        state: 'on'
+      - condition: state
+        entity_id: input_boolean.skip_irrigation_today
+        state: 'off'
+    actions:
+      - action: script.start_irrigation   # placeholder — disabled
+        data: {}
+        enabled: false
+      - action: switch.turn_on
+        target:
+          entity_id: switch.outside_controller_irrigation
+    mode: single
+
+  # ── Reset Skip Irrigation Today ─────────────────────────────────────────
+  # Clears both skip flags at midnight so the next day's schedule runs.
+  # irrigation_cancelled_rain is reset here too so the rain banner
+  # does not carry over to the following day.
+  - id: irrigation_reset_skip_today
+    alias: "Reset Skip Irrigation Today"
+    description: "Clear skip and rain flags at midnight so tomorrow's schedule runs normally"
+    triggers:
+      - trigger: time
+        at: '00:00:00'
+    actions:
+      - action: input_boolean.turn_off
+        target:
+          entity_id:
+            - input_boolean.skip_irrigation_today
+            - input_boolean.irrigation_cancelled_rain
+    mode: single
+
+  # ── Skip Irrigation on Rain Forecast ────────────────────────────────────
+  # Sets both skip_irrigation_today and irrigation_cancelled_rain when
+  # today's forecast rain exceeds 10 mm. Setting both means the dashboard
+  # shows the rain-specific banner rather than the generic "cancelled" banner.
+  # Replace sensor.canberra_forecast_rain_amount_max_0 with your forecast sensor.
+  - id: irrigation_skip_on_rain
+    alias: "Skip Irrigation on Rain Forecast"
+    description: "Skip today's irrigation and flag rain cancellation when forecast exceeds 10 mm"
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.canberra_forecast_rain_amount_max_0  # ← replace with your sensor
+        above: 10
+    actions:
+      - action: input_boolean.turn_on
+        target:
+          entity_id:
+            - input_boolean.skip_irrigation_today
+            - input_boolean.irrigation_cancelled_rain
+    mode: single
