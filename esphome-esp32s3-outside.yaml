@@ -143,15 +143,32 @@ substitutions:
 esphome:
   name: outside-controller
   friendly_name: Outside Controller
-  # De-energise the garage relay (HL-52S relay 2) as early as possible during
-  # boot. With inverted: true on the output pin, output.turn_off drives GPIO4
-  # HIGH → relay open. The irrigation relay uses switch.gpio with ALWAYS_OFF
-  # and does not need an explicit on_boot action — its GPIO is driven HIGH
-  # (coil off) by the switch platform's own setup routine.
   on_boot:
-    priority: 600
-    then:
-      - output.turn_off: garage_relay_output
+    # De-energise the garage relay (HL-52S relay 2) as early as possible during
+    # boot. With inverted: true on the output pin, output.turn_off drives GPIO4
+    # HIGH → relay open. The irrigation relay uses switch.gpio with ALWAYS_OFF
+    # and does not need an explicit on_boot action — its GPIO is driven HIGH
+    # (coil off) by the switch platform's own setup routine.
+    - priority: 600
+      then:
+        - output.turn_off: garage_relay_output
+
+    # Detect whether the irrigation relay was on when power was lost. NVS globals
+    # are restored before any on_boot handler runs, so irrigation_was_active
+    # reflects the pre-outage state here. If it is true the relay was active when
+    # power was cut (ALWAYS_OFF has since closed it safely); copy the fact to the
+    # sticky alert flag and clear the live tracker so a subsequent reboot does not
+    # re-trigger the alert.
+    - priority: -100
+      then:
+        - if:
+            condition:
+              lambda: 'return id(irrigation_was_active);'
+            then:
+              - lambda: |-
+                  id(irrigation_was_active) = false;
+                  id(irrigation_interrupted_flag) = true;
+              - logger.log: "WARNING: Irrigation cycle was interrupted by a power outage"
 
 
 # ── Hardware target ───────────────────────────────────────────────────────────
@@ -222,6 +239,24 @@ globals:
     type: int
     restore_value: no
     initial_value: '0'
+
+  # Irrigation: true while the relay is on. Persisted to NVS so a reboot
+  # can detect whether the relay was active when power was lost.
+  # Written true on relay turn-on; false on relay turn-off. On boot, if still
+  # true it means power was cut mid-session; the on_boot handler at priority -100
+  # copies the fact to irrigation_interrupted_flag and clears this flag.
+  - id: irrigation_was_active
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+
+  # Irrigation: set true on boot when a mid-session power outage is detected.
+  # Persisted to NVS so the alert survives further reboots until acknowledged.
+  # Cleared by the Clear Irrigation Interrupted button or a HA automation.
+  - id: irrigation_interrupted_flag
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
 
 
 # ── Number ────────────────────────────────────────────────────────────────────
@@ -396,10 +431,13 @@ switch:
     icon: "mdi:sprinkler"
     restore_mode: ALWAYS_OFF
     on_turn_on:
-      - lambda: 'id(hours_since_watered) = 0;'
+      - lambda: |-
+          id(hours_since_watered) = 0;
+          id(irrigation_was_active) = true;
       - script.execute: max_duration_cap
     on_turn_off:
       - script.stop: max_duration_cap
+      - lambda: 'id(irrigation_was_active) = false;'
 
 
 # ── Binary sensors ────────────────────────────────────────────────────────────
@@ -500,6 +538,18 @@ binary_sensor:
     filters:
       - delayed_on_off: 50ms
 
+  # ── Irrigation interrupted by power outage ───────────────────────────────
+  # Becomes ON on the first boot after power was cut while the relay was
+  # active. Stays ON (persisted via irrigation_interrupted_flag in NVS)
+  # until cleared by the Clear Irrigation Interrupted button or a HA
+  # automation. Use this sensor to trigger a HA notification or alert.
+  - platform: template
+    name: "Irrigation Interrupted"
+    id: irrigation_interrupted_sensor
+    device_class: problem
+    icon: "mdi:alert-circle"
+    lambda: 'return id(irrigation_interrupted_flag);'
+
 
 # ── Button ────────────────────────────────────────────────────────────────────
 button:
@@ -524,6 +574,16 @@ button:
             times: 98
             wait_time: 0ms
       - lambda: 'id(is_transmitting) = false;'
+
+  # ── Clear Irrigation Interrupted ─────────────────────────────────────────
+  # Clears the power-outage interruption alert. Press in the HA UI (or call
+  # via a HA automation) after reviewing the incomplete session.
+  - platform: template
+    name: "Clear Irrigation Interrupted"
+    id: clear_irrigation_interrupted
+    icon: "mdi:check-circle"
+    on_press:
+      - lambda: 'id(irrigation_interrupted_flag) = false;'
 
 
 # ── Interval — irrigation watchdog & fallback schedule ───────────────────────
