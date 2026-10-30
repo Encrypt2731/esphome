@@ -144,31 +144,29 @@ esphome:
   name: outside-controller
   friendly_name: Outside Controller
   on_boot:
-    # De-energise the garage relay (HL-52S relay 2) as early as possible during
-    # boot. With inverted: true on the output pin, output.turn_off drives GPIO4
-    # HIGH → relay open. The irrigation relay uses switch.gpio with ALWAYS_OFF
-    # and does not need an explicit on_boot action — its GPIO is driven HIGH
-    # (coil off) by the switch platform's own setup routine.
-    - priority: 600
-      then:
-        - output.turn_off: garage_relay_output
-
-    # Detect whether the irrigation relay was on when power was lost. NVS globals
-    # are restored before any on_boot handler runs, so irrigation_was_active
-    # reflects the pre-outage state here. If it is true the relay was active when
-    # power was cut (ALWAYS_OFF has since closed it safely); copy the fact to the
-    # sticky alert flag and clear the live tracker so a subsequent reboot does not
-    # re-trigger the alert.
-    - priority: -100
-      then:
-        - if:
-            condition:
-              lambda: 'return id(irrigation_was_active);'
-            then:
-              - lambda: |-
-                  id(irrigation_was_active) = false;
-                  id(irrigation_interrupted_flag) = true;
-              - logger.log: "WARNING: Irrigation cycle was interrupted by a power outage"
+    # Priority 600 fires before WiFi or the HA API initialise. By this point
+    # all component setup() methods have run, so NVS globals are already
+    # restored to their persisted values.
+    #
+    # Two actions share this single handler:
+    #   1. De-energise the garage relay (HL-52S relay 2). With inverted: true,
+    #      output.turn_off drives GPIO4 HIGH → relay open.
+    #   2. Detect whether the irrigation relay was on when power was lost.
+    #      If irrigation_was_active is true the relay was active when power was
+    #      cut (ALWAYS_OFF has since closed it safely). Copy the fact to the
+    #      sticky alert flag and clear the live tracker so a subsequent reboot
+    #      does not re-trigger the alert.
+    priority: 600
+    then:
+      - output.turn_off: garage_relay_output
+      - if:
+          condition:
+            lambda: 'return id(irrigation_was_active);'
+          then:
+            - lambda: |-
+                id(irrigation_was_active) = false;
+                id(irrigation_interrupted_flag) = true;
+            - logger.log: "WARNING: Irrigation cycle was interrupted by a power outage"
 
 
 # ── Hardware target ───────────────────────────────────────────────────────────
