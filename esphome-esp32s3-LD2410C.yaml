@@ -76,42 +76,8 @@ number:
       name: Max Move Distance Gate
     max_still_distance_gate:
       name: Max Still Distance Gate
-    g0_move_threshold:
-      name: "Gate 0 Move Threshold"
-    g1_move_threshold:
-      name: "Gate 1 Move Threshold"
-    g2_move_threshold:
-      name: "Gate 2 Move Threshold"
-    g3_move_threshold:
-      name: "Gate 3 Move Threshold"
-    g4_move_threshold:
-      name: "Gate 4 Move Threshold"
-    g5_move_threshold:
-      name: "Gate 5 Move Threshold"
-    g6_move_threshold:
-      name: "Gate 6 Move Threshold"
-    g7_move_threshold:
-      name: "Gate 7 Move Threshold"
-    g8_move_threshold:
-      name: "Gate 8 Move Threshold"
-    g0_still_threshold:
-      name: "Gate 0 Still Threshold"
-    g1_still_threshold:
-      name: "Gate 1 Still Threshold"
-    g2_still_threshold:
-      name: "Gate 2 Still Threshold"
-    g3_still_threshold:
-      name: "Gate 3 Still Threshold"
-    g4_still_threshold:
-      name: "Gate 4 Still Threshold"
-    g5_still_threshold:
-      name: "Gate 5 Still Threshold"
-    g6_still_threshold:
-      name: "Gate 6 Still Threshold"
-    g7_still_threshold:
-      name: "Gate 7 Still Threshold"
-    g8_still_threshold:
-      name: "Gate 8 Still Threshold"
+    light_threshold:
+      name: Light Threshold
 
 select:
   - platform: ld2410
